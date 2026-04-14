@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Slice"
+  short_description: "Stage selected Git hunks safely"
+  default_prompt: "Use $git-slice to stage only selected hunks or patch edits with git slice."
