@@ -2,8 +2,9 @@
 
 ## CLI
 
-Clone the repo and put the repo directory on your `PATH` so Git can find the
-`git-slice` wrapper:
+Git discovers external subcommands by looking for executables named `git-*` on
+your `PATH`. This repo ships `git-slice`, so the setup is simply: clone the
+repo and put the repo directory on your `PATH`.
 
 ```bash
 git clone git@github.com:oinoom/git-slice.git
@@ -26,20 +27,6 @@ The repo-contained skill is at [skills/git-slice](skills/git-slice).
 
 If you want an agent to use it, tell the agent to install
 [$git-slice](skills/git-slice/SKILL.md).
-
-For Codex, one direct install path is:
-
-```bash
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-ln -s "$PWD/skills/git-slice" "${CODEX_HOME:-$HOME/.codex}/skills/git-slice"
-```
-
-After that, the agent can use the local `git slice` interface:
-
-```bash
-git slice show
-git slice pick 2
-```
 
 ## What To Tell The Agent
 
