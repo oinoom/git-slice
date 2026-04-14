@@ -1,6 +1,6 @@
 # git-slice
 
-`slice` stages selected portions of the current unstaged diff without using
+`git slice` stages selected portions of the current unstaged diff without using
 `git add -p`.
 
 It is primarily useful for AI agents and other automation that do not interact
@@ -10,11 +10,15 @@ inspect hunks as JSON, choose hunk IDs, and stage them non-interactively.
 If you want `git add -p` style selective staging for tools like Codex or
 Claude, this is the interface.
 
+The intended setup is to put this repo on your `PATH` so Git automatically
+discovers the `git-slice` wrapper from the start. After that, use `git slice`
+everywhere.
+
 The normal loop is:
 
-1. `slice show`
-2. `slice pick`
-3. `slice show` again
+1. `git slice show`
+2. `git slice pick`
+3. `git slice show` again
 
 For installation and skill setup, see [install.md](install.md).
 
@@ -23,17 +27,17 @@ For installation and skill setup, see [install.md](install.md).
 Repo-wide:
 
 ```bash
-./slice show
-./slice pick 2 5-7
-./slice show
+git slice show
+git slice pick 2 5-7
+git slice show
 ```
 
 One file:
 
 ```bash
-./slice show --path app/models/user.rb
-./slice pick --path app/models/user.rb 2
-./slice show --path app/models/user.rb
+git slice show --path app/models/user.rb
+git slice pick --path app/models/user.rb 2
+git slice show --path app/models/user.rb
 ```
 
 ## Selector Rules
@@ -42,34 +46,34 @@ Use `--path` as the canonical way to scope to one file.
 
 - No `--path`: IDs are repo-wide.
 - `--path <file>`: IDs are local to that file.
-- `slice show 3` means repo-wide hunk `3`.
-- `slice show --path app/models/user.rb 2` means file-local hunk `2`.
+- `git slice show 3` means repo-wide hunk `3`.
+- `git slice show --path app/models/user.rb 2` means file-local hunk `2`.
 
-After a successful `pick`, run `show` again before choosing more IDs. IDs are
+After a successful `pick`, run `git slice show` again before choosing more IDs. IDs are
 recomputed from the current diff.
 
 Positional path syntax still works as a compatibility shortcut:
 
 ```bash
-./slice show app/models/user.rb 2
-./slice pick app/models/user.rb 2
+git slice show app/models/user.rb 2
+git slice pick app/models/user.rb 2
 ```
 
 Prefer the `--path` form in new usage.
 
 ## `show`
 
-`slice show` returns a flat JSON array of hunks.
+`git slice show` returns a flat JSON array of hunks.
 
 Examples:
 
 ```bash
-./slice show
-./slice show 3
-./slice show 2 5-7
-./slice show --path app/models/user.rb
-./slice show --path app/models/user.rb 2
-./slice show --path "docs and notes/report.txt" 1
+git slice show
+git slice show 3
+git slice show 2 5-7
+git slice show --path app/models/user.rb
+git slice show --path app/models/user.rb 2
+git slice show --path "docs and notes/report.txt" 1
 ```
 
 Example output:
@@ -114,21 +118,21 @@ Other fields are there to help agents and tooling:
 
 ## `pick`
 
-`slice pick` stages the selected hunk IDs.
+`git slice pick` stages the selected hunk IDs.
 
 Examples:
 
 ```bash
-./slice pick 2
-./slice pick 2 5-7
-./slice pick --path app/models/user.rb 2
-./slice pick --path app/models/user.rb 1 3
+git slice pick 2
+git slice pick 2 5-7
+git slice pick --path app/models/user.rb 2
+git slice pick --path app/models/user.rb 1 3
 ```
 
 If you want to preview the exact patch that would be staged without applying it:
 
 ```bash
-./slice pick --path app/models/user.rb 2 --print-patch
+git slice pick --path app/models/user.rb 2 --print-patch
 ```
 
 ## Advanced Escape Hatch
@@ -137,32 +141,32 @@ Use `patch` and `apply` only when one hunk contains multiple logical edits and
 you need sub-hunk precision.
 
 ```bash
-./slice patch demo.txt > patch.diff
+git slice patch demo.txt > patch.diff
 # remove unwanted + or - lines from patch.diff
-./slice apply patch.diff
+git slice apply patch.diff
 ```
 
 From stdin:
 
 ```bash
-./slice patch path/to/file | sed '/^+debug/d' | ./slice apply -
+git slice patch path/to/file | sed '/^+debug/d' | git slice apply -
 ```
 
 ## Commands
 
-### `slice show [--path PATH] [selectors ...]`
+### `git slice show [--path PATH] [selectors ...]`
 
 Show hunks as a flat JSON array.
 
-### `slice pick [--path PATH] <selectors ...>`
+### `git slice pick [--path PATH] <selectors ...>`
 
 Stage selected hunk IDs.
 
-### `slice patch [path]`
+### `git slice patch [path]`
 
 Print the full unstaged patch for a path or for the whole repo.
 
-### `slice apply <patch-file|->`
+### `git slice apply <patch-file|->`
 
 Apply an edited patch to the index only.
 
