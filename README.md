@@ -3,6 +3,13 @@
 `slice` stages selected portions of the current unstaged diff without using
 `git add -p`.
 
+It is primarily useful for AI agents and other automation that do not interact
+well with an interactive TUI. Instead of driving `git add -p`, an agent can
+inspect hunks as JSON, choose hunk IDs, and stage them non-interactively.
+
+If you want `git add -p` style selective staging for tools like Codex or
+Claude, this is the interface.
+
 The normal loop is:
 
 1. `slice show`
