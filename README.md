@@ -1,84 +1,53 @@
-# ai-partial-stage
+# git-slice
 
 `slice` stages selected portions of the current unstaged diff without using
 `git add -p`.
 
-It gives an agent two stable interfaces:
+Most users and agents only need two commands:
 
-1. Structured hunk selection:
+1. `slice list` to see the current changes and their IDs.
+2. `slice pick` to stage one or more of those IDs.
 
-```bash
-./slice list path/to/file
-./slice show path/to/file 1 3
-./slice pick path/to/file 1,3
-```
+Everything else is secondary.
 
-2. Patch editing for sub-hunk precision:
+For installation and skill setup, see [install.md](install.md).
 
-```bash
-./slice patch path/to/file > partial.patch
-# edit the patch
-./slice apply partial.patch
-```
-
-## How It Works
-
-`slice` reads the current unstaged diff, parses it into hunks, assigns hunk
-IDs, and then either:
-
-- rebuilds a patch containing only the selected hunks and stages it with
-  `git apply --cached`, or
-- applies an edited patch directly to the index with `git apply --cached`
-
-It never stages the entire file unless the selected hunks happen to cover the
-whole file.
-
-## Quick Start
-
-File-scoped flow:
-
-```bash
-./slice list app/models/user.rb
-./slice show app/models/user.rb 2
-./slice pick app/models/user.rb 2
-```
+## Start Here
 
 Repo-wide flow:
 
 ```bash
 ./slice list
-./slice show 2 5-7
 ./slice pick 2 5-7
 ```
 
-Patch-edit flow:
+File-scoped flow:
 
 ```bash
-./slice patch app/models/user.rb > partial.patch
-# remove the lines you do not want to stage
-./slice apply partial.patch
+./slice list app/models/user.rb
+./slice pick app/models/user.rb 2
 ```
 
-Read patch from stdin:
+If you want to inspect the exact patch before staging it:
 
 ```bash
-./slice patch path/to/file | sed '/^+debug/d' | ./slice apply -
+./slice show app/models/user.rb 2
 ```
 
-## Commands
+## Step 1: List Changes And IDs
 
-### `slice list [path]`
+Run `slice list` first.
 
-List selectable hunks as JSON.
-
-With a path, IDs are local to that file.
-
-Without a path, IDs are global across the current unstaged diff for the repo.
-
-Example:
+Without a path, it shows all current unstaged changes in the repo:
 
 ```bash
 ./slice list
+```
+
+With a path, it shows only that file:
+
+```bash
+./slice list app/models/user.rb
 ```
 
 Example output:
@@ -103,23 +72,59 @@ Example output:
       "added_lines": 1,
       "removed_lines": 1,
       "summary": "-old value | +new value"
+    },
+    {
+      "id": 2,
+      "path": "first.txt",
+      "file_hunk_id": 2,
+      "old_start": 42,
+      "new_start": 42,
+      "kind": "addition",
+      "added_lines": 3,
+      "removed_lines": 0,
+      "summary": "+new helper function"
     }
   ]
 }
 ```
 
-Fields:
+Important fields:
 
-- `id`: selector for `show` and `pick`
-- `path`: file that owns the hunk
-- `file_hunk_id`: hunk number within that file
+- `id`: the selector you pass to `pick` or `show`
+- `path`: the file that owns the hunk
+- `file_hunk_id`: the hunk number within that file
 - `old_start` / `new_start`: line numbers from the diff header
 - `kind`: `mixed`, `addition`, `deletion`, or `context`
-- `summary`: short scan-friendly snippet for agent decisions
+- `summary`: a short snippet to help humans and agents decide quickly
 
-### `slice show [--path <path>] <selectors...>`
+## Step 2: Stage By ID
 
-Print the exact patch for selected hunk IDs without staging them.
+After you have the IDs you want, pass them to `slice pick`.
+
+File-scoped:
+
+```bash
+./slice pick app/models/user.rb 2
+./slice pick app/models/user.rb 1 3
+```
+
+Repo-wide:
+
+```bash
+./slice pick 2
+./slice pick 2 5-7
+```
+
+If you want to see the exact patch that would be staged without applying it:
+
+```bash
+./slice pick app/models/user.rb 2 --print-patch
+```
+
+## Step 3: Preview Specific IDs
+
+Use `slice show` when the summary is not enough and you want the exact hunk
+before staging it.
 
 Examples:
 
@@ -131,7 +136,86 @@ Examples:
 
 `--path` is useful when a filename could be confused with numeric selectors.
 
-### `slice pick [--path <path>] <selectors...>`
+## How IDs Work
+
+File-scoped mode:
+
+```bash
+./slice list path/to/file
+./slice pick path/to/file 1 3
+```
+
+- IDs are local to that file.
+- `1` means "first hunk in that file".
+
+Repo-wide mode:
+
+```bash
+./slice list
+./slice pick 2 5-7
+```
+
+- IDs are global across the current unstaged diff.
+- `2` means "second hunk in the repo-wide diff order".
+
+IDs are regenerated from the current diff each time you run `list`. After a
+successful `pick`, run `list` again before choosing more IDs.
+
+## Common Examples
+
+Stage one hunk from a file with two edits:
+
+```bash
+./slice list demo.txt
+./slice pick demo.txt 1
+git diff --cached -- demo.txt
+git diff -- demo.txt
+```
+
+Stage across multiple files in one command:
+
+```bash
+./slice list
+./slice pick 2 4
+```
+
+Preview a repo-wide hunk before staging:
+
+```bash
+./slice list
+./slice show 3
+./slice pick 3
+```
+
+## Advanced: Sub-Hunk Precision
+
+`slice pick` stages whole hunks by ID. When one hunk contains multiple logical
+edits and you only want part of it, use the advanced patch flow:
+
+```bash
+./slice patch demo.txt > patch.diff
+# remove unwanted + or - lines from patch.diff
+./slice apply patch.diff
+```
+
+Read patch from stdin:
+
+```bash
+./slice patch path/to/file | sed '/^+debug/d' | ./slice apply -
+```
+
+Use this only when hunk-level selection is too coarse.
+
+## Command Reference
+
+### `slice list [path]`
+
+List selectable hunks as JSON.
+
+- With a path, IDs are local to that file.
+- Without a path, IDs are global across the current unstaged diff for the repo.
+
+### `slice pick [path] <selectors...>`
 
 Stage the selected hunk IDs.
 
@@ -143,11 +227,9 @@ Examples:
 ./slice pick --path "docs and notes/report.txt" 1
 ```
 
-You can preview what would be staged without applying it:
+### `slice show [--path <path>] <selectors...>`
 
-```bash
-./slice pick app/models/user.rb 2 --print-patch
-```
+Print the exact patch for selected hunk IDs without staging them.
 
 ### `slice patch [path]`
 
@@ -172,69 +254,19 @@ Examples:
 cat partial.patch | ./slice apply -
 ```
 
-## Selection Rules
+## How It Works
 
-File-scoped mode:
+`slice` reads the current unstaged diff, parses it into hunks, assigns IDs,
+and stages only the hunks you selected.
 
-```bash
-./slice list path/to/file
-./slice pick path/to/file 1 3
-```
+For normal `pick` usage, it rebuilds a patch containing only those hunks and
+stages it with `git apply --cached`.
 
-- hunk IDs are local to that file
-- `1` means “first hunk in that file”
+For advanced `apply` usage, it applies an edited patch directly to the index
+with `git apply --cached`.
 
-Repo-wide mode:
-
-```bash
-./slice list
-./slice pick 2 5-7
-```
-
-- hunk IDs are global across the entire current unstaged diff
-- `2` means “second hunk in the repo-wide diff order”
-
-Important: hunk IDs are regenerated from the current diff each time you run
-`list`. After a successful `pick`, run `list` again before choosing more IDs.
-
-## When To Use `pick` vs `apply`
-
-Use `pick` when:
-
-- whole hunks map cleanly to the change you want
-- the agent can choose by hunk summary and line range alone
-
-Use `patch` + `apply` when:
-
-- the hunk contains multiple logical edits
-- the agent needs sub-hunk precision
-- the agent wants to remove individual added lines before staging
-
-## End-to-End Examples
-
-Stage one hunk from a file with two edits:
-
-```bash
-./slice list demo.txt
-./slice pick demo.txt 1
-git diff --cached -- demo.txt
-git diff -- demo.txt
-```
-
-Stage across multiple files in one command:
-
-```bash
-./slice list
-./slice pick 2 4
-```
-
-Stage only part of a single hunk:
-
-```bash
-./slice patch demo.txt > patch.diff
-# remove unwanted + lines from patch.diff
-./slice apply patch.diff
-```
+It never stages the entire file unless your selected hunks happen to cover the
+whole file.
 
 ## Git Integration
 
@@ -257,7 +289,10 @@ git status
 
 ## Skill
 
-A repo-contained skill lives at [skills/git-slice](/Users/davidanekstein/NTL/ai-partial-stage/skills/git-slice).
+A repo-contained skill lives at [skills/git-slice](skills/git-slice).
+
+If you want an agent to use it, tell the agent to install
+[$git-slice](skills/git-slice/SKILL.md).
 
 It teaches an agent when to use `git slice`, how to choose between file-scoped
 and repo-wide selection, and when to fall back to `patch` + `apply`.
