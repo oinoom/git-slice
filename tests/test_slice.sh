@@ -36,16 +36,18 @@ gamma
 DELTA
 EOF
 
-  "$TOOL" list demo.txt > hunks.json
+  "$TOOL" show demo.txt > hunks.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("hunks.json").read_text())
-assert payload["hunk_count"] == 2, payload
-assert payload["hunks"][0]["kind"] == "mixed", payload
-assert "@@ -2 +2 @@" in payload["hunks"][0]["diff"], payload
-assert "-beta\n+BETA\n" in payload["hunks"][0]["diff"], payload
+assert isinstance(payload, list), payload
+assert len(payload) == 2, payload
+assert payload[0]["kind"] == "mixed", payload
+assert "@@ -2 +2 @@" in payload[0]["diff"], payload
+assert payload[0]["subtraction"] == "-beta\n", payload
+assert payload[0]["addition"] == "+BETA\n", payload
 PY
 
   "$TOOL" pick demo.txt 1
@@ -58,7 +60,7 @@ PY
   grep -q -- '-delta' unstaged.diff
 }
 
-case_repo_wide_list_and_pick() {
+case_repo_wide_show_and_pick() {
   repo=$(make_repo)
   cd "$repo"
   cat > first.txt <<'EOF'
@@ -85,24 +87,34 @@ GREEN
 blue
 EOF
 
-  "$TOOL" list > repo.json
+  "$TOOL" show > repo.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("repo.json").read_text())
-assert payload["scope"] == "repo", payload
-assert payload["file_count"] == 2, payload
-assert payload["hunk_count"] == 3, payload
-assert payload["hunks"][0]["path"] == "first.txt", payload
-assert payload["hunks"][2]["path"] == "second.txt", payload
-assert "diff --git a/first.txt b/first.txt" in payload["hunks"][0]["diff"], payload
-assert "@@ -1 +1 @@" in payload["hunks"][0]["diff"], payload
+assert isinstance(payload, list), payload
+assert len(payload) == 3, payload
+assert payload[0]["path"] == "first.txt", payload
+assert payload[2]["path"] == "second.txt", payload
+assert "diff --git a/first.txt b/first.txt" in payload[0]["diff"], payload
+assert "@@ -1 +1 @@" in payload[0]["diff"], payload
+assert payload[0]["subtraction"] == "-first\n", payload
+assert payload[0]["addition"] == "+FIRST\n", payload
 PY
 
-  "$TOOL" show 2 3 > selected.patch
-  grep -q '+TAIL' selected.patch
-  grep -q '+GREEN' selected.patch
+  "$TOOL" show 2 3 > selected.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("selected.json").read_text())
+assert len(payload) == 2, payload
+assert payload[0]["id"] == 2, payload
+assert payload[1]["id"] == 3, payload
+assert "+TAIL\n" in payload[0]["addition"], payload
+assert "+GREEN\n" in payload[1]["addition"], payload
+PY
 
   "$TOOL" pick 2 3
   git diff --cached -- first.txt second.txt > staged.diff
@@ -131,8 +143,17 @@ THREE
 four
 EOF
 
-  "$TOOL" show demo.txt 2 > selected.patch
-  grep -q '+THREE' selected.patch
+  "$TOOL" show demo.txt 2 > selected.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("selected.json").read_text())
+assert len(payload) == 1, payload
+assert payload[0]["id"] == 2, payload
+assert payload[0]["addition"] == "+THREE\n", payload
+assert payload[0]["subtraction"] == "-three\n", payload
+PY
   "$TOOL" pick demo.txt 2
   git diff --cached -- demo.txt > staged.diff
   grep -q '+THREE' staged.diff
@@ -158,15 +179,15 @@ for idx in (9, 199, 499, 749):
 Path("big.txt").write_text("".join(lines))
 PY
 
-  "$TOOL" list big.txt > big.json
+  "$TOOL" show big.txt > big.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("big.json").read_text())
-assert payload["hunk_count"] == 4, payload
-assert payload["hunks"][1]["old_start"] == 200, payload
-assert payload["hunks"][3]["old_start"] == 750, payload
+assert len(payload) == 4, payload
+assert payload[1]["old_start"] == 200, payload
+assert payload[3]["old_start"] == 750, payload
 PY
 
   "$TOOL" pick big.txt 2 4
@@ -176,66 +197,6 @@ PY
   grep -q '+changed 0750' staged.diff
   grep -q '+changed 0010' unstaged.diff
   grep -q '+changed 0500' unstaged.diff
-}
-
-case_paginated_list() {
-  repo=$(make_repo)
-  cd "$repo"
-  cat > page.txt <<'EOF'
-one
-two
-three
-four
-five
-six
-EOF
-  git add page.txt
-  git commit -q -m "initial"
-
-  cat > page.txt <<'EOF'
-ONE
-two
-THREE
-four
-FIVE
-six
-EOF
-
-  "$TOOL" list page.txt --page 2 > page2.json
-  python3 - <<'PY'
-import json
-from pathlib import Path
-
-payload = json.loads(Path("page2.json").read_text())
-assert payload["scope"] == "file", payload
-assert payload["hunk_count"] == 3, payload
-assert payload["page"] == 2, payload
-assert payload["page_size"] == 1, payload
-assert payload["total_pages"] == 3, payload
-assert payload["has_previous_page"] is True, payload
-assert payload["has_next_page"] is True, payload
-assert payload["previous_page"] == 1, payload
-assert payload["next_page"] == 3, payload
-assert payload["returned_hunk_count"] == 1, payload
-assert len(payload["hunks"]) == 1, payload
-assert payload["hunks"][0]["id"] == 2, payload
-assert "-three\n+THREE\n" in payload["hunks"][0]["diff"], payload
-PY
-
-  "$TOOL" list --page-size 2 --page 2 > repo-page.json
-  python3 - <<'PY'
-import json
-from pathlib import Path
-
-payload = json.loads(Path("repo-page.json").read_text())
-assert payload["scope"] == "repo", payload
-assert payload["page"] == 2, payload
-assert payload["page_size"] == 2, payload
-assert payload["returned_hunk_count"] == 1, payload
-assert payload["hunks"][0]["id"] == 3, payload
-assert payload["hunks"][0]["path"] == "page.txt", payload
-assert "-five\n+FIVE\n" in payload["hunks"][0]["diff"], payload
-PY
 }
 
 case_incremental_relist() {
@@ -260,14 +221,14 @@ Path("spread.txt").write_text("".join(lines))
 PY
 
   "$TOOL" pick spread.txt 1
-  "$TOOL" list spread.txt > relisted.json
+  "$TOOL" show spread.txt > relisted.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("relisted.json").read_text())
-assert payload["hunk_count"] == 2, payload
-assert payload["hunks"][0]["old_start"] == 8, payload
+assert len(payload) == 2, payload
+assert payload[0]["old_start"] == 8, payload
 PY
 
   "$TOOL" pick spread.txt 2
@@ -429,35 +390,11 @@ EOF
   git add clean.txt
   git commit -q -m "initial"
 
-  if "$TOOL" list clean.txt >out 2>err; then
+  if "$TOOL" show clean.txt >out 2>err; then
     echo "expected no-changes failure" >&2
     return 1
   fi
   grep -q 'No unstaged changes' err
-}
-
-case_invalid_page() {
-  repo=$(make_repo)
-  cd "$repo"
-  cat > page.txt <<'EOF'
-start
-middle
-end
-EOF
-  git add page.txt
-  git commit -q -m "initial"
-
-  cat > page.txt <<'EOF'
-START
-middle
-end
-EOF
-
-  if "$TOOL" list page.txt --page 2 >out 2>err; then
-    echo "expected invalid page failure" >&2
-    return 1
-  fi
-  grep -q 'Invalid page: 2' err
 }
 
 case_additions_and_deletions() {
@@ -479,17 +416,54 @@ middle
 tail
 EOF
 
-  "$TOOL" list shape.txt > shape.json
+  "$TOOL" show shape.txt > shape.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("shape.json").read_text())
-assert payload["hunk_count"] >= 1, payload
+assert len(payload) >= 1, payload
+assert "addition" in payload[0] or "subtraction" in payload[0], payload
 PY
 
   "$TOOL" patch shape.txt --zero-context > shape.patch
   git apply --cached --check --recount --unidiff-zero shape.patch
+}
+
+case_optional_addition_and_subtraction_fields() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > add.txt <<'EOF'
+one
+EOF
+  cat > del.txt <<'EOF'
+alpha
+beta
+EOF
+  git add add.txt del.txt
+  git commit -q -m "initial"
+
+  cat > add.txt <<'EOF'
+one
+two
+EOF
+  cat > del.txt <<'EOF'
+alpha
+EOF
+
+  "$TOOL" show > optional.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("optional.json").read_text())
+assert len(payload) == 2, payload
+by_path = {entry["path"]: entry for entry in payload}
+assert by_path["add.txt"]["addition"] == "+two\n", by_path
+assert "subtraction" not in by_path["add.txt"], by_path
+assert by_path["del.txt"]["subtraction"] == "-beta\n", by_path
+assert "addition" not in by_path["del.txt"], by_path
+PY
 }
 
 case_git_subcommand_integration() {
@@ -509,15 +483,16 @@ GREEN
 blue
 EOF
 
-  PATH="$GIT_SLICE_PATH:$PATH" git slice list > subcmd.json
+  PATH="$GIT_SLICE_PATH:$PATH" git slice show > subcmd.json
   python3 - <<'PY'
 import json
 from pathlib import Path
 
 payload = json.loads(Path("subcmd.json").read_text())
-assert payload["hunk_count"] == 1, payload
-assert payload["hunks"][0]["summary"] == "-green | +GREEN", payload
-assert "-green\n+GREEN\n" in payload["hunks"][0]["diff"], payload
+assert len(payload) == 1, payload
+assert payload[0]["subtraction"] == "-green\n", payload
+assert payload[0]["addition"] == "+GREEN\n", payload
+assert "-green\n+GREEN\n" in payload[0]["diff"], payload
 PY
 
   PATH="$GIT_SLICE_PATH:$PATH" git slice pick 1
@@ -530,10 +505,9 @@ PY
 }
 
 case_basic_pick
-case_repo_wide_list_and_pick
+case_repo_wide_show_and_pick
 case_show_and_pick
 case_large_sparse_file
-case_paginated_list
 case_incremental_relist
 case_patch_edit_single_hunk
 case_repo_wide_patch
@@ -541,8 +515,8 @@ case_patch_apply_from_stdin
 case_path_with_spaces
 case_invalid_selector
 case_no_changes
-case_invalid_page
 case_additions_and_deletions
+case_optional_addition_and_subtraction_fields
 case_git_subcommand_integration
 
 echo "ok"

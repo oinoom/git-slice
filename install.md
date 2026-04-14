@@ -14,7 +14,7 @@ export PATH="$PWD:$PATH"
 After that, these should work:
 
 ```bash
-git slice list
+git slice show
 git slice pick 1
 ```
 
@@ -37,7 +37,7 @@ ln -s "$PWD/skills/git-slice" "${CODEX_HOME:-$HOME/.codex}/skills/git-slice"
 After that, the agent can use the local `git slice` interface:
 
 ```bash
-git slice list --page 1
+git slice show
 git slice pick 2
 ```
 
@@ -51,7 +51,7 @@ Install and use [$git-slice](skills/git-slice/SKILL.md).
 
 Once installed, the normal agent loop is:
 
-1. `git slice list --page N` to inspect exact hunk diffs one page at a time
-2. `git slice list` to inspect the full JSON payload when needed
+1. `git slice show` to inspect the flat JSON list of hunks
+2. `git slice show ...` with IDs when it wants just specific hunks
 3. `git slice pick ...` to stage selected IDs
-4. `git slice list` again before making another selection
+4. `git slice show` again before making another selection

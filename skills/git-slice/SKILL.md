@@ -13,42 +13,44 @@ to the repo-local `./slice` command from the project root.
 
 ## Workflow
 
-1. Inspect the current unstaged diff.
+1. Inspect the current unstaged diff with `git slice show`.
 2. Decide whether the change is best handled as whole hunks or as an edited patch.
-3. Stage the selected portion.
-4. Re-list before making another selection, because hunk IDs can change after staging.
+3. Stage the selected portion with `git slice pick`.
+4. Re-run `git slice show` before making another selection, because hunk IDs can change after staging.
 
 ## Inspect
 
 Use file-scoped mode when the task is clearly about one file:
 
 ```bash
-git slice list path/to/file
+git slice show path/to/file
 ```
 
 Use repo-wide mode when the user did not specify a file or wants to stage
 across multiple files:
 
 ```bash
-git slice list
+git slice show
 ```
 
-To inspect hunks one at a time, similar to `git add -p`, page through them:
+Use IDs when you want only specific hunks back:
 
 ```bash
-git slice list --page 1
-git slice list --page 2
+git slice show 3
+git slice show path/to/file 2
 ```
 
 Interpret the JSON as follows:
 
-- `id`: selector for `show` and `pick`
+- `id`: selector for `pick`
 - `path`: file that owns the hunk in repo-wide mode
 - `file_hunk_id`: local hunk id within one file
-- `summary`: fast scan of the changed lines
 - `diff`: exact patch text for that hunk
+- `addition`: added lines for the hunk when present
+- `subtraction`: removed lines for the hunk when present
 - `old_start` / `new_start`: line anchors from the diff header
-- `page` / `page_size` / `total_pages`: pagination metadata for hunk-by-hunk browsing
+
+`show` returns a flat JSON array of hunks, not a wrapper object.
 
 ## Choose The Mode
 
@@ -71,13 +73,6 @@ Repo-wide:
 git slice pick 2 5-7
 ```
 
-Preview without staging:
-
-```bash
-git slice show path/to/file 2
-git slice show 4 6
-```
-
 ## Stage Part Of A Hunk
 
 Export the patch, edit it, and apply it to the index:
@@ -94,15 +89,14 @@ git slice patch path/to/file | sed '/^+debug/d' | git slice apply -
 ```
 
 When editing the patch, remove added lines or whole hunk pieces you do not want
-to stage. Do not assume hunk IDs are stable after `apply`; run `list` again.
+to stage. Do not assume hunk IDs are stable after `apply`; run `show` again.
 
 ## Safety Rules
 
-- Use `list` before `pick`; do not guess hunk IDs.
-- Use `list --page N` when you want one-hunk-at-a-time browsing.
-- Re-run `list` after each successful `pick` or `apply`.
+- Use `show` before `pick`; do not guess hunk IDs.
+- Re-run `show` after each successful `pick` or `apply`.
 - Use `--path <path>` with `show` or `pick` when a filename could be confused
   with numeric selectors.
-- Prefer the `diff` field from `list`; use `show` when you want raw patch text outside JSON.
+- Prefer the `diff` field from `show` when deciding which hunk to stage.
 - Prefer `patch` plus `apply` for sub-hunk precision instead of trying to map
   line-level intent onto whole-hunk selection.
