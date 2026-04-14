@@ -442,12 +442,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stage only selected slices of a changed file.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    show_parser = subparsers.add_parser("show", help="Show selectable hunks as JSON with inline diff text.")
-    show_parser.add_argument("--path", dest="path_option", help="Optional path to limit the diff scope.")
+    show_parser = subparsers.add_parser(
+        "show",
+        help="Show selectable hunks as JSON with inline diff text.",
+        usage="slice show [--path PATH] [selectors ...]",
+    )
+    show_parser.add_argument(
+        "--path",
+        dest="path_option",
+        help="Canonical way to limit the diff scope to one file.",
+    )
     show_parser.add_argument(
         "targets",
         nargs="*",
-        help="Optional '<path> [selectors...]' or repo-wide selectors like '1 3 5-7'.",
+        help=(
+            "Repo-wide selectors like '1 3 5-7'. "
+            "Positional '<path> [selectors...]' still works as a compatibility shortcut."
+        ),
     )
     show_parser.set_defaults(func=cmd_show)
 
@@ -460,12 +471,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     patch_parser.set_defaults(func=cmd_patch)
 
-    stage_parser = subparsers.add_parser("pick", help="Stage selected hunk ids.")
-    stage_parser.add_argument("--path", dest="path_option", help="Optional path to limit the diff scope.")
+    stage_parser = subparsers.add_parser(
+        "pick",
+        help="Stage selected hunk ids.",
+        usage="slice pick [--path PATH] <selectors ...>",
+    )
+    stage_parser.add_argument(
+        "--path",
+        dest="path_option",
+        help="Canonical way to limit staging to one file.",
+    )
     stage_parser.add_argument(
         "targets",
         nargs="+",
-        help="Either '<path> <selectors...>' or repo-wide selectors like '1 3 5-7'.",
+        help=(
+            "Selectors like '1 3 5-7'. "
+            "Positional '<path> <selectors...>' still works as a compatibility shortcut."
+        ),
     )
     stage_parser.add_argument(
         "--print-patch",

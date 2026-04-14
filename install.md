@@ -52,6 +52,15 @@ Install and use [$git-slice](skills/git-slice/SKILL.md).
 Once installed, the normal agent loop is:
 
 1. `git slice show` to inspect the flat JSON list of hunks
-2. `git slice show ...` with IDs when it wants just specific hunks
+2. `git slice show --path <file>` when it wants file-local IDs
 3. `git slice pick ...` to stage selected IDs
 4. `git slice show` again before making another selection
+
+Use `--path` as the canonical file-scoping form:
+
+```bash
+git slice show --path app/models/user.rb
+git slice pick --path app/models/user.rb 2
+```
+
+Positional path syntax still works, but the `--path` form is the recommended one for new usage.

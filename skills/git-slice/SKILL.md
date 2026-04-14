@@ -20,10 +20,10 @@ to the repo-local `./slice` command from the project root.
 
 ## Inspect
 
-Use file-scoped mode when the task is clearly about one file:
+Use `--path` as the canonical way to scope to one file:
 
 ```bash
-git slice show path/to/file
+git slice show --path path/to/file
 ```
 
 Use repo-wide mode when the user did not specify a file or wants to stage
@@ -37,7 +37,7 @@ Use IDs when you want only specific hunks back:
 
 ```bash
 git slice show 3
-git slice show path/to/file 2
+git slice show --path path/to/file 2
 ```
 
 Interpret the JSON as follows:
@@ -52,6 +52,9 @@ Interpret the JSON as follows:
 
 `show` returns a flat JSON array of hunks, not a wrapper object.
 
+Positional path syntax still works as a compatibility shortcut, but prefer
+`--path` in new usage.
+
 ## Choose The Mode
 
 Use `pick` when whole hunks match the desired change.
@@ -64,7 +67,7 @@ part of the hunk should be staged.
 File-scoped:
 
 ```bash
-git slice pick path/to/file 1 3
+git slice pick --path path/to/file 1 3
 ```
 
 Repo-wide:
@@ -95,8 +98,8 @@ to stage. Do not assume hunk IDs are stable after `apply`; run `show` again.
 
 - Use `show` before `pick`; do not guess hunk IDs.
 - Re-run `show` after each successful `pick` or `apply`.
-- Use `--path <path>` with `show` or `pick` when a filename could be confused
-  with numeric selectors.
+- Prefer `--path <path>` with `show` and `pick` for all new usage, not just
+  ambiguous filenames.
 - Prefer the `diff` field from `show` when deciding which hunk to stage.
 - Prefer `patch` plus `apply` for sub-hunk precision instead of trying to map
   line-level intent onto whole-hunk selection.
