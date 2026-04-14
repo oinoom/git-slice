@@ -172,16 +172,18 @@ Apply an edited patch to the index only.
 
 ## Git Integration
 
-If `git-slice` is on your `PATH`, Git automatically exposes:
+The intended installation is to put this repo on your `PATH` once and then use
+`git slice` as a normal Git subcommand from that point on.
 
 ```bash
 git slice ...
 ```
 
-Example:
+See [install.md](install.md) for the setup step.
+
+After setup, the workflow stays the same:
 
 ```bash
-export PATH="/path/to/ai-partial-stage:$PATH"
 git slice show
 git slice pick 1 3
 git status
