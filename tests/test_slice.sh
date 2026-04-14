@@ -44,6 +44,8 @@ from pathlib import Path
 payload = json.loads(Path("hunks.json").read_text())
 assert payload["hunk_count"] == 2, payload
 assert payload["hunks"][0]["kind"] == "mixed", payload
+assert "@@ -2 +2 @@" in payload["hunks"][0]["diff"], payload
+assert "-beta\n+BETA\n" in payload["hunks"][0]["diff"], payload
 PY
 
   "$TOOL" pick demo.txt 1
@@ -94,6 +96,8 @@ assert payload["file_count"] == 2, payload
 assert payload["hunk_count"] == 3, payload
 assert payload["hunks"][0]["path"] == "first.txt", payload
 assert payload["hunks"][2]["path"] == "second.txt", payload
+assert "diff --git a/first.txt b/first.txt" in payload["hunks"][0]["diff"], payload
+assert "@@ -1 +1 @@" in payload["hunks"][0]["diff"], payload
 PY
 
   "$TOOL" show 2 3 > selected.patch
@@ -172,6 +176,66 @@ PY
   grep -q '+changed 0750' staged.diff
   grep -q '+changed 0010' unstaged.diff
   grep -q '+changed 0500' unstaged.diff
+}
+
+case_paginated_list() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > page.txt <<'EOF'
+one
+two
+three
+four
+five
+six
+EOF
+  git add page.txt
+  git commit -q -m "initial"
+
+  cat > page.txt <<'EOF'
+ONE
+two
+THREE
+four
+FIVE
+six
+EOF
+
+  "$TOOL" list page.txt --page 2 > page2.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("page2.json").read_text())
+assert payload["scope"] == "file", payload
+assert payload["hunk_count"] == 3, payload
+assert payload["page"] == 2, payload
+assert payload["page_size"] == 1, payload
+assert payload["total_pages"] == 3, payload
+assert payload["has_previous_page"] is True, payload
+assert payload["has_next_page"] is True, payload
+assert payload["previous_page"] == 1, payload
+assert payload["next_page"] == 3, payload
+assert payload["returned_hunk_count"] == 1, payload
+assert len(payload["hunks"]) == 1, payload
+assert payload["hunks"][0]["id"] == 2, payload
+assert "-three\n+THREE\n" in payload["hunks"][0]["diff"], payload
+PY
+
+  "$TOOL" list --page-size 2 --page 2 > repo-page.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("repo-page.json").read_text())
+assert payload["scope"] == "repo", payload
+assert payload["page"] == 2, payload
+assert payload["page_size"] == 2, payload
+assert payload["returned_hunk_count"] == 1, payload
+assert payload["hunks"][0]["id"] == 3, payload
+assert payload["hunks"][0]["path"] == "page.txt", payload
+assert "-five\n+FIVE\n" in payload["hunks"][0]["diff"], payload
+PY
 }
 
 case_incremental_relist() {
@@ -372,6 +436,30 @@ EOF
   grep -q 'No unstaged changes' err
 }
 
+case_invalid_page() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > page.txt <<'EOF'
+start
+middle
+end
+EOF
+  git add page.txt
+  git commit -q -m "initial"
+
+  cat > page.txt <<'EOF'
+START
+middle
+end
+EOF
+
+  if "$TOOL" list page.txt --page 2 >out 2>err; then
+    echo "expected invalid page failure" >&2
+    return 1
+  fi
+  grep -q 'Invalid page: 2' err
+}
+
 case_additions_and_deletions() {
   repo=$(make_repo)
   cd "$repo"
@@ -429,6 +517,7 @@ from pathlib import Path
 payload = json.loads(Path("subcmd.json").read_text())
 assert payload["hunk_count"] == 1, payload
 assert payload["hunks"][0]["summary"] == "-green | +GREEN", payload
+assert "-green\n+GREEN\n" in payload["hunks"][0]["diff"], payload
 PY
 
   PATH="$GIT_SLICE_PATH:$PATH" git slice pick 1
@@ -444,6 +533,7 @@ case_basic_pick
 case_repo_wide_list_and_pick
 case_show_and_pick
 case_large_sparse_file
+case_paginated_list
 case_incremental_relist
 case_patch_edit_single_hunk
 case_repo_wide_patch
@@ -451,6 +541,7 @@ case_patch_apply_from_stdin
 case_path_with_spaces
 case_invalid_selector
 case_no_changes
+case_invalid_page
 case_additions_and_deletions
 case_git_subcommand_integration
 

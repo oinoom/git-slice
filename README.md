@@ -5,7 +5,7 @@
 
 Most users and agents only need two commands:
 
-1. `slice list` to see the current changes and their IDs.
+1. `slice list` to see the current changes, their IDs, and the exact diff for each hunk.
 2. `slice pick` to stage one or more of those IDs.
 
 Everything else is secondary.
@@ -17,18 +17,25 @@ For installation and skill setup, see [install.md](install.md).
 Repo-wide flow:
 
 ```bash
-./slice list
+./slice list --page 1
+./slice list --page 2
 ./slice pick 2 5-7
 ```
 
 File-scoped flow:
 
 ```bash
-./slice list app/models/user.rb
+./slice list app/models/user.rb --page 1
 ./slice pick app/models/user.rb 2
 ```
 
-If you want to inspect the exact patch before staging it:
+If you want the full JSON for all hunks at once:
+
+```bash
+./slice list
+```
+
+If you want a raw patch instead of JSON:
 
 ```bash
 ./slice show app/models/user.rb 2
@@ -50,6 +57,20 @@ With a path, it shows only that file:
 ./slice list app/models/user.rb
 ```
 
+To walk hunks one page at a time, similar to `git add -p`, use `--page`:
+
+```bash
+./slice list --page 1
+./slice list --page 2
+./slice list app/models/user.rb --page 3
+```
+
+`--page` defaults to one hunk per page. Use `--page-size` to group multiple hunks:
+
+```bash
+./slice list --page 2 --page-size 3
+```
+
 Example output:
 
 ```json
@@ -57,6 +78,13 @@ Example output:
   "scope": "repo",
   "file_count": 2,
   "hunk_count": 3,
+  "page": 1,
+  "page_size": 1,
+  "returned_hunk_count": 1,
+  "total_pages": 3,
+  "has_previous_page": false,
+  "has_next_page": true,
+  "next_page": 2,
   "files": [
     { "path": "first.txt", "hunk_count": 2 },
     { "path": "second.txt", "hunk_count": 1 }
@@ -71,18 +99,8 @@ Example output:
       "kind": "mixed",
       "added_lines": 1,
       "removed_lines": 1,
-      "summary": "-old value | +new value"
-    },
-    {
-      "id": 2,
-      "path": "first.txt",
-      "file_hunk_id": 2,
-      "old_start": 42,
-      "new_start": 42,
-      "kind": "addition",
-      "added_lines": 3,
-      "removed_lines": 0,
-      "summary": "+new helper function"
+      "summary": "-old value | +new value",
+      "diff": "diff --git a/first.txt b/first.txt\nindex 1111111..2222222 100644\n--- a/first.txt\n+++ b/first.txt\n@@ -10 +10 @@\n-old value\n+new value\n"
     }
   ]
 }
@@ -95,7 +113,9 @@ Important fields:
 - `file_hunk_id`: the hunk number within that file
 - `old_start` / `new_start`: line numbers from the diff header
 - `kind`: `mixed`, `addition`, `deletion`, or `context`
-- `summary`: a short snippet to help humans and agents decide quickly
+- `summary`: a short snippet for quick scanning
+- `diff`: the exact patch fragment for that hunk
+- `page` / `page_size` / `total_pages`: pagination controls for hunk-by-hunk browsing
 
 ## Step 2: Stage By ID
 
@@ -123,8 +143,8 @@ If you want to see the exact patch that would be staged without applying it:
 
 ## Step 3: Preview Specific IDs
 
-Use `slice show` when the summary is not enough and you want the exact hunk
-before staging it.
+Use `slice show` when you want the raw patch for one or more IDs without the
+JSON envelope from `list`.
 
 Examples:
 
@@ -161,6 +181,9 @@ Repo-wide mode:
 IDs are regenerated from the current diff each time you run `list`. After a
 successful `pick`, run `list` again before choosing more IDs.
 
+When using `--page`, the page number is just a way to browse. The actual
+selector you pass to `pick` is still the hunk `id`.
+
 ## Common Examples
 
 Stage one hunk from a file with two edits:
@@ -182,9 +205,16 @@ Stage across multiple files in one command:
 Preview a repo-wide hunk before staging:
 
 ```bash
-./slice list
-./slice show 3
+./slice list --page 3
 ./slice pick 3
+```
+
+Browse one hunk at a time, `git add -p` style:
+
+```bash
+./slice list --page 1
+./slice list --page 2
+./slice list --page 3
 ```
 
 ## Advanced: Sub-Hunk Precision
@@ -208,12 +238,15 @@ Use this only when hunk-level selection is too coarse.
 
 ## Command Reference
 
-### `slice list [path]`
+### `slice list [--page N] [--page-size N] [path]`
 
-List selectable hunks as JSON.
+List selectable hunks as JSON, including the exact diff text for each returned
+hunk.
 
 - With a path, IDs are local to that file.
 - Without a path, IDs are global across the current unstaged diff for the repo.
+- `--page` returns one page of hunks and defaults to one hunk per page.
+- `--page-size` returns multiple hunks per page.
 
 ### `slice pick [path] <selectors...>`
 

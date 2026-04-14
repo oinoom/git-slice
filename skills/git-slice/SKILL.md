@@ -33,13 +33,22 @@ across multiple files:
 git slice list
 ```
 
+To inspect hunks one at a time, similar to `git add -p`, page through them:
+
+```bash
+git slice list --page 1
+git slice list --page 2
+```
+
 Interpret the JSON as follows:
 
 - `id`: selector for `show` and `pick`
 - `path`: file that owns the hunk in repo-wide mode
 - `file_hunk_id`: local hunk id within one file
 - `summary`: fast scan of the changed lines
+- `diff`: exact patch text for that hunk
 - `old_start` / `new_start`: line anchors from the diff header
+- `page` / `page_size` / `total_pages`: pagination metadata for hunk-by-hunk browsing
 
 ## Choose The Mode
 
@@ -90,9 +99,10 @@ to stage. Do not assume hunk IDs are stable after `apply`; run `list` again.
 ## Safety Rules
 
 - Use `list` before `pick`; do not guess hunk IDs.
+- Use `list --page N` when you want one-hunk-at-a-time browsing.
 - Re-run `list` after each successful `pick` or `apply`.
 - Use `--path <path>` with `show` or `pick` when a filename could be confused
   with numeric selectors.
-- Prefer `show` before `pick` when the summaries are ambiguous.
+- Prefer the `diff` field from `list`; use `show` when you want raw patch text outside JSON.
 - Prefer `patch` plus `apply` for sub-hunk precision instead of trying to map
   line-level intent onto whole-hunk selection.

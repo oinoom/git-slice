@@ -84,6 +84,9 @@ class FilePatch:
     header_lines: list[str]
     hunks: list[Hunk]
 
+    def hunk_patch(self, hunk: Hunk) -> str:
+        return "".join(self.header_lines + [hunk.header, *hunk.lines])
+
     def selected_patch(self, indexes: set[int]) -> str:
         selected = [hunk for idx, hunk in enumerate(self.hunks, start=1) if idx in indexes]
         if not selected:
@@ -292,18 +295,64 @@ def build_hunk_payload(hunk: Hunk, hunk_id: int, *, path: str | None = None, fil
     return payload
 
 
-def build_list_payload(repo_patch: RepoPatch, path: str | None) -> dict:
+def build_file_hunk_entries(file_patch: FilePatch, resolved_path: str, *, local_ids: bool) -> list[dict]:
+    entries: list[dict] = []
+    for idx, hunk in enumerate(file_patch.hunks, start=1):
+        hunk_id = idx if local_ids else idx
+        payload = build_hunk_payload(hunk, hunk_id, path=resolved_path, file_hunk_id=idx)
+        payload["diff"] = file_patch.hunk_patch(hunk)
+        entries.append(payload)
+    return entries
+
+
+def paginate_hunk_entries(entries: list[dict], *, page: int | None, page_size: int | None) -> tuple[list[dict], dict]:
+    if page_size is None and page is None:
+        effective_page_size = len(entries)
+    elif page_size is None:
+        effective_page_size = 1
+    else:
+        effective_page_size = page_size
+
+    effective_page = page or 1
+    if effective_page < 1:
+        raise SystemExit("Page number must be 1 or greater.")
+    if effective_page_size < 1:
+        raise SystemExit("Page size must be 1 or greater.")
+
+    total_pages = max(1, (len(entries) + effective_page_size - 1) // effective_page_size)
+    if effective_page > total_pages:
+        raise SystemExit(f"Invalid page: {effective_page}. Available range: 1-{total_pages}")
+
+    start = (effective_page - 1) * effective_page_size
+    end = start + effective_page_size
+    page_entries = entries[start:end]
+    metadata = {
+        "page": effective_page,
+        "page_size": effective_page_size,
+        "returned_hunk_count": len(page_entries),
+        "total_pages": total_pages,
+        "has_previous_page": effective_page > 1,
+        "has_next_page": effective_page < total_pages,
+    }
+    if effective_page > 1:
+        metadata["previous_page"] = effective_page - 1
+    if effective_page < total_pages:
+        metadata["next_page"] = effective_page + 1
+    return page_entries, metadata
+
+
+def build_list_payload(repo_patch: RepoPatch, path: str | None, *, page: int | None, page_size: int | None) -> dict:
     if path is not None and repo_patch.file_count == 1:
         file_patch = repo_patch.files[0]
         resolved_path = file_patch.path or path
+        hunks = build_file_hunk_entries(file_patch, resolved_path, local_ids=True)
+        hunks, pagination = paginate_hunk_entries(hunks, page=page, page_size=page_size)
         return {
             "scope": "file",
             "path": resolved_path,
             "hunk_count": len(file_patch.hunks),
-            "hunks": [
-                build_hunk_payload(hunk, idx, path=resolved_path, file_hunk_id=idx)
-                for idx, hunk in enumerate(file_patch.hunks, start=1)
-            ],
+            **pagination,
+            "hunks": hunks,
         }
 
     files_payload = [
@@ -313,14 +362,17 @@ def build_list_payload(repo_patch: RepoPatch, path: str | None) -> dict:
         }
         for file_patch in repo_patch.files
     ]
-    hunks_payload = [
-        build_hunk_payload(hunk, global_id, path=file_patch.path, file_hunk_id=file_hunk_id)
-        for global_id, file_patch, file_hunk_id, hunk in repo_patch.iter_hunks()
-    ]
+    hunks_payload = []
+    for global_id, file_patch, file_hunk_id, hunk in repo_patch.iter_hunks():
+        payload = build_hunk_payload(hunk, global_id, path=file_patch.path, file_hunk_id=file_hunk_id)
+        payload["diff"] = file_patch.hunk_patch(hunk)
+        hunks_payload.append(payload)
+    hunks_payload, pagination = paginate_hunk_entries(hunks_payload, page=page, page_size=page_size)
     return {
         "scope": "repo",
         "file_count": repo_patch.file_count,
         "hunk_count": repo_patch.hunk_count,
+        **pagination,
         "files": files_payload,
         "hunks": hunks_payload,
     }
@@ -362,7 +414,7 @@ def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool) -> None:
 def cmd_list(args: argparse.Namespace) -> int:
     diff_text = diff_for_scope(args.path, zero_context=True)
     repo_patch = parse_repo_patch(diff_text, args.path)
-    payload = build_list_payload(repo_patch, args.path)
+    payload = build_list_payload(repo_patch, args.path, page=args.page, page_size=args.page_size)
     json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
@@ -407,8 +459,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stage only selected slices of a changed file.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="List selectable hunks as JSON.")
+    list_parser = subparsers.add_parser("list", help="List selectable hunks as JSON, including exact diff text.")
     list_parser.add_argument("path", nargs="?", help="Optional path to limit the diff scope.")
+    list_parser.add_argument(
+        "--page",
+        type=int,
+        help="Return a single page of hunks. Defaults to page size 1 unless --page-size is set.",
+    )
+    list_parser.add_argument(
+        "--page-size",
+        type=int,
+        help="Number of hunks to return per page. Defaults to all hunks unless --page is set.",
+    )
     list_parser.set_defaults(func=cmd_list)
 
     show_parser = subparsers.add_parser("show", help="Print the patch for selected hunk ids.")
