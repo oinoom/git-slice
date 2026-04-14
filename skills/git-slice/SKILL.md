@@ -8,8 +8,13 @@ description: Selectively stage only part of the current unstaged Git diff using 
 Stage selected hunks or edited patches with `git slice` instead of driving
 `git add -p` interactively.
 
-Prefer `git slice` when available on `PATH`. If it is not available, fall back
-to the repo-local `./slice` command from the project root.
+This skill is primarily useful for AI agents that do not interact well with an
+interactive TUI. The intended setup is to put this repo on `PATH` so Git
+automatically discovers the `git-slice` wrapper and the agent can use
+`git slice` directly.
+
+Use `git slice` as the primary interface. Only fall back to the repo-local
+`./slice` command if `git slice` is unavailable in the current environment.
 
 ## Workflow
 
