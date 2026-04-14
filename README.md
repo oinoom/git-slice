@@ -3,7 +3,7 @@
 `git slice` stages selected portions of the current unstaged diff without using
 `git add -p`.
 
-It is primarily useful for AI agents and other automation that do not interact
+It is primarily useful for AI agents and other automation that do not do
 well with an interactive TUI. Instead of driving `git add -p`, an agent can
 inspect hunks as JSON, choose hunk IDs, and stage them non-interactively.
 
