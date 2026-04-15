@@ -1,6 +1,6 @@
 ---
 name: git-slice
-description: Selectively stage only part of the current unstaged Git diff using the local `git slice` tool. Use when Codex needs to stage specific hunks or patch edits without staging an entire file, when the user asks to stage “just this part”, “only these changes”, “piecewise stage”, or when `git add -p` would normally be the manual fallback.
+description: Selectively stage or unstage part of the current Git diff using the local `git slice` tool. Use when Codex needs to stage or unstage specific hunks, line-level changes, or patch edits without operating on an entire file, when the user asks to stage “just this part”, “only these changes”, “piecewise stage”, or when `git add -p` would normally be the manual fallback.
 ---
 
 # Git Slice
