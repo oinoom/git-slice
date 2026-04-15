@@ -29,26 +29,35 @@ After that, use:
 git slice ...
 ```
 
-## First Successful Use
+## Typical Use
 
-Repo-wide:
+Use `git slice` when the current diff contains more than one logical change and
+you want to stage only the parts that belong in the next commit.
+
+The usual flow is:
+
+1. run `git slice show` to inspect the current selectable hunks and their IDs
+2. run `git slice pick ...` with the IDs you want to stage for this commit
+3. stop there if you are done, or run `git slice show` again only if you want
+   to keep splitting the remaining unstaged diff into another commit
+
+Repo-wide example:
 
 ```bash
 git slice show
 git slice pick 2 5-7
-git slice show
 ```
 
-One file:
+One-file example:
 
 ```bash
 git slice show --path app/models/user.rb
 git slice pick --path app/models/user.rb 2
-git slice show --path app/models/user.rb
 ```
 
-The reason for the second `show` is that hunk IDs are recomputed from the
-current diff after every successful `pick`.
+If you are making several partial commits from the same working tree, inspect
+again after each successful `pick`. Hunk IDs are computed from the current
+remaining diff, so they can change after staging part of it.
 
 ## What `show` returns
 
