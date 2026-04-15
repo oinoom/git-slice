@@ -1,28 +1,35 @@
 # git-slice
 
-`git slice` stages selected portions of the current unstaged diff without using
-`git add -p`.
+`git slice` is a non-interactive interface for staging part of the current
+unstaged diff.
 
-It is primarily useful for AI agents and other automation that do not do
-well with an interactive TUI. Instead of driving `git add -p`, an agent can
-inspect hunks as JSON, choose hunk IDs, and stage them non-interactively.
+It is mainly for AI agents and other automation that do not handle `git add -p`
+well. Instead of driving an interactive TUI, an agent can:
+
+1. inspect hunks as JSON
+2. choose hunk IDs
+3. stage those hunks directly
 
 If you want `git add -p` style selective staging for tools like Codex or
 Claude, this is the interface.
 
-The intended setup is to put this repo on your `PATH` so Git automatically
-discovers the `git-slice` wrapper from the start. After that, use `git slice`
-everywhere.
-
-The normal loop is:
-
-1. `git slice show`
-2. `git slice pick`
-3. `git slice show` again
-
 For installation and skill setup, see [install.md](install.md).
 
-## Happy Path
+## How `git slice` is found
+
+Put this repo on your `PATH`.
+
+Git looks for executables named `git-*` on `PATH`, so once this repo root is on
+`PATH`, Git discovers [git-slice](git-slice), which is a small wrapper around
+[slice](slice).
+
+After that, use:
+
+```bash
+git slice ...
+```
+
+## First Successful Use
 
 Repo-wide:
 
@@ -40,40 +47,17 @@ git slice pick --path app/models/user.rb 2
 git slice show --path app/models/user.rb
 ```
 
-## Selector Rules
+The reason for the second `show` is that hunk IDs are recomputed from the
+current diff after every successful `pick`.
 
-Use `--path` as the canonical way to scope to one file.
-
-- No `--path`: IDs are repo-wide.
-- `--path <file>`: IDs are local to that file.
-- `git slice show 3` means repo-wide hunk `3`.
-- `git slice show --path app/models/user.rb 2` means file-local hunk `2`.
-
-After a successful `pick`, run `git slice show` again before choosing more IDs. IDs are
-recomputed from the current diff.
-
-Positional path syntax still works as a compatibility shortcut:
-
-```bash
-git slice show app/models/user.rb 2
-git slice pick app/models/user.rb 2
-```
-
-Prefer the `--path` form in new usage.
-
-## `show`
+## What `show` returns
 
 `git slice show` returns a flat JSON array of hunks.
 
-Examples:
+Example:
 
 ```bash
-git slice show
-git slice show 3
-git slice show 2 5-7
 git slice show --path app/models/user.rb
-git slice show --path app/models/user.rb 2
-git slice show --path "docs and notes/report.txt" 1
 ```
 
 Example output:
@@ -82,7 +66,7 @@ Example output:
 [
   {
     "id": 1,
-    "path": "first.txt",
+    "path": "app/models/user.rb",
     "file_hunk_id": 1,
     "header": "@@ -10 +10 @@",
     "old_start": 10,
@@ -94,7 +78,7 @@ Example output:
     "removed_lines": 1,
     "addition": "+new value\n",
     "subtraction": "-old value\n",
-    "diff": "diff --git a/first.txt b/first.txt\nindex 1111111..2222222 100644\n--- a/first.txt\n+++ b/first.txt\n@@ -10 +10 @@\n-old value\n+new value\n"
+    "diff": "diff --git a/app/models/user.rb b/app/models/user.rb\nindex 1111111..2222222 100644\n--- a/app/models/user.rb\n+++ b/app/models/user.rb\n@@ -10 +10 @@\n-old value\n+new value\n"
   }
 ]
 ```
@@ -106,7 +90,7 @@ The fields most people care about are:
 - `addition`: added lines, when present
 - `subtraction`: removed lines, when present
 
-Other fields are there to help agents and tooling:
+Other fields are there for tooling:
 
 - `path`
 - `file_hunk_id`
@@ -116,29 +100,52 @@ Other fields are there to help agents and tooling:
 - `kind`
 - `added_lines` / `removed_lines`
 
-## `pick`
+## Scope And Selectors
 
-`git slice pick` stages the selected hunk IDs.
-
-Examples:
+By default, IDs are repo-wide:
 
 ```bash
-git slice pick 2
+git slice show
+git slice show 3
 git slice pick 2 5-7
-git slice pick --path app/models/user.rb 2
+```
+
+Use `--path` to scope to one file. In that mode, IDs are local to that file:
+
+```bash
+git slice show --path app/models/user.rb
+git slice show --path app/models/user.rb 2
 git slice pick --path app/models/user.rb 1 3
 ```
 
-If you want to preview the exact patch that would be staged without applying it:
+Use `--path` as the normal file-scoped form. Positional path syntax still
+works as a compatibility shortcut:
 
 ```bash
-git slice pick --path app/models/user.rb 2 --print-patch
+git slice show app/models/user.rb 2
+git slice pick app/models/user.rb 2
 ```
 
-## Advanced Escape Hatch
+But positional paths are ambiguous for unusual filenames, especially
+numeric-looking ones. `--path` avoids that ambiguity.
 
-Use `patch` and `apply` only when one hunk contains multiple logical edits and
-you need sub-hunk precision.
+## Failure Modes
+
+`git slice show` can fail in two common ways:
+
+- Clean diff: `No unstaged changes found.`
+- No text hunks available: `No text hunks available for partial staging.`
+
+The second case usually means Git does not have text hunks to work with for the
+current change.
+
+## Sub-Hunk Edits
+
+Use `patch` and `apply` only when one hunk still contains multiple logical
+edits and hunk-level `pick` is too coarse.
+
+`patch` prints the current diff. You edit that patch, then `apply` applies the
+edited patch to the index only.
 
 ```bash
 git slice patch demo.txt > patch.diff
@@ -152,42 +159,33 @@ From stdin:
 git slice patch path/to/file | sed '/^+debug/d' | git slice apply -
 ```
 
-## Commands
+If you want a machine-oriented patch with minimal context:
 
-### `git slice show [--path PATH] [selectors ...]`
+```bash
+git slice patch --zero-context path/to/file
+```
 
-Show hunks as a flat JSON array.
+## Command Summary
 
-### `git slice pick [--path PATH] <selectors ...>`
+`git slice show [--path PATH] [selectors ...]`
+
+Show hunks as JSON with inline diff text.
+
+`git slice pick [--path PATH] <selectors ...>`
 
 Stage selected hunk IDs.
 
-### `git slice patch [path]`
+`git slice pick --print-patch ...`
 
-Print the full unstaged patch for a path or for the whole repo.
+Print the patch that would be staged instead of applying it.
 
-### `git slice apply <patch-file|->`
+`git slice patch [path]`
+
+Print the current unstaged patch for one path or for the whole repo.
+
+`git slice apply <patch-file|->`
 
 Apply an edited patch to the index only.
-
-## Git Integration
-
-The intended installation is to put this repo on your `PATH` once and then use
-`git slice` as a normal Git subcommand from that point on.
-
-```bash
-git slice ...
-```
-
-See [install.md](install.md) for the setup step.
-
-After setup, the workflow stays the same:
-
-```bash
-git slice show
-git slice pick 1 3
-git status
-```
 
 ## Skill
 
