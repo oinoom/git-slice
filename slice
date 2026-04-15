@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""CLI for staging slices of file changes in Git."""
+"""CLI for staging or unstaging selected slices of Git changes."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -16,7 +17,27 @@ HUNK_RE = re.compile(
     r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?P<suffix>.*)$"
 )
-SELECTOR_RE = re.compile(r"^\d+(?:[-,]\d+)*$")
+DIFF_GIT_RE = re.compile(r"^diff --git a/(?P<old>.+) b/(?P<new>.+)$")
+HUNK_SELECTOR_RE = re.compile(r"^\d+(?:-\d+)?$")
+LINE_SELECTOR_RE = re.compile(r"^\d+\.\d+$")
+STABLE_SELECTOR_RE = re.compile(r"^[hc]_[0-9a-f]{16}$")
+
+
+@dataclass
+class ChangeLine:
+    ordinal: int
+    kind: str
+    addition: str | None = None
+    subtraction: str | None = None
+
+    @property
+    def signature(self) -> str:
+        payload = {
+            "kind": self.kind,
+            "addition": self.addition,
+            "subtraction": self.subtraction,
+        }
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 @dataclass
@@ -54,23 +75,19 @@ class Hunk:
 
     @property
     def addition(self) -> str:
-        return "".join(
-            line for line in self.lines if line.startswith("+") and not line.startswith("+++")
-        )
+        return "".join(self.added_lines_raw())
 
     @property
     def subtraction(self) -> str:
-        return "".join(
-            line for line in self.lines if line.startswith("-") and not line.startswith("---")
-        )
+        return "".join(self.removed_lines_raw())
 
     @property
     def added_lines(self) -> int:
-        return sum(1 for line in self.lines if line.startswith("+") and not line.startswith("+++"))
+        return len(self.added_lines_raw())
 
     @property
     def removed_lines(self) -> int:
-        return sum(1 for line in self.lines if line.startswith("-") and not line.startswith("---"))
+        return len(self.removed_lines_raw())
 
     @property
     def kind(self) -> str:
@@ -82,6 +99,55 @@ class Hunk:
             return "deletion"
         return "context"
 
+    def added_lines_raw(self) -> list[str]:
+        return [line for line in self.lines if line.startswith("+") and not line.startswith("+++")]
+
+    def removed_lines_raw(self) -> list[str]:
+        return [line for line in self.lines if line.startswith("-") and not line.startswith("---")]
+
+    def change_lines(self) -> list[ChangeLine]:
+        removed = self.removed_lines_raw()
+        added = self.added_lines_raw()
+        changes: list[ChangeLine] = []
+        for idx in range(max(len(removed), len(added))):
+            subtraction = removed[idx] if idx < len(removed) else None
+            addition = added[idx] if idx < len(added) else None
+            if subtraction and addition:
+                kind = "mixed"
+            elif addition:
+                kind = "addition"
+            else:
+                kind = "deletion"
+            changes.append(
+                ChangeLine(
+                    ordinal=idx + 1,
+                    kind=kind,
+                    addition=addition,
+                    subtraction=subtraction,
+                )
+            )
+        return changes
+
+    def selected_patch_lines(self, selected_changes: set[int], *, context_from_new: bool = False) -> list[str]:
+        rendered: list[str] = []
+        any_selected = False
+        for change in self.change_lines():
+            if change.ordinal in selected_changes:
+                any_selected = True
+                if change.subtraction is not None:
+                    rendered.append(change.subtraction)
+                if change.addition is not None:
+                    rendered.append(change.addition)
+                continue
+
+            context_line = change.addition if context_from_new else change.subtraction
+            if context_line is not None:
+                rendered.append(f" {context_line[1:]}")
+
+        if not any_selected:
+            return []
+        return rendered
+
 
 @dataclass
 class FilePatch:
@@ -92,19 +158,53 @@ class FilePatch:
     def hunk_patch(self, hunk: Hunk) -> str:
         return "".join(self.header_lines + [hunk.header, *hunk.lines])
 
-    def selected_patch(self, indexes: set[int]) -> str:
-        selected = [hunk for idx, hunk in enumerate(self.hunks, start=1) if idx in indexes]
-        if not selected:
+    def selected_patch(
+        self,
+        hunk_ids: set[int],
+        line_ids: dict[int, set[int]],
+        *,
+        context_from_new: bool = False,
+    ) -> str:
+        rendered_hunks: list[str] = []
+        for idx, hunk in enumerate(self.hunks, start=1):
+            if idx in hunk_ids:
+                rendered_hunks.extend([hunk.header, *hunk.lines])
+                continue
+
+            selected_changes = line_ids.get(idx)
+            if not selected_changes:
+                continue
+            partial_lines = hunk.selected_patch_lines(
+                selected_changes,
+                context_from_new=context_from_new,
+            )
+            if partial_lines:
+                rendered_hunks.extend([hunk.header, *partial_lines])
+
+        if not rendered_hunks:
             raise ValueError("No hunks selected")
-        return "".join(self.header_lines + [line for hunk in selected for line in [hunk.header, *hunk.lines]])
+        return "".join(self.header_lines + rendered_hunks)
 
     def full_patch(self) -> str:
         return "".join(self.header_lines + [line for hunk in self.hunks for line in [hunk.header, *hunk.lines]])
 
 
 @dataclass
+class UnsupportedChange:
+    path: str | None
+    reason: str
+
+    @property
+    def description(self) -> str:
+        if self.path:
+            return f"{self.reason}: {self.path}"
+        return self.reason
+
+
+@dataclass
 class RepoPatch:
     files: list[FilePatch]
+    unsupported: list[UnsupportedChange] = field(default_factory=list)
 
     @property
     def hunk_count(self) -> int:
@@ -121,22 +221,43 @@ class RepoPatch:
                 yield global_id, file_patch, file_hunk_id, hunk
                 global_id += 1
 
-    def selected_patch(self, indexes: set[int]) -> str:
+    def selected_patch(
+        self,
+        hunk_ids: set[int],
+        line_ids: dict[int, set[int]],
+        *,
+        context_from_new: bool = False,
+    ) -> str:
         parts: list[str] = []
-        selected_ids = set(indexes)
+        global_id = 1
         for file_patch in self.files:
-            selected_hunks: list[Hunk] = []
-            for global_id, current_file, _, hunk in self.iter_hunks():
-                if current_file is file_patch and global_id in selected_ids:
-                    selected_hunks.append(hunk)
-            if selected_hunks:
+            selected_file_hunks: set[int] = set()
+            selected_file_lines: dict[int, set[int]] = {}
+            for file_hunk_id, _ in enumerate(file_patch.hunks, start=1):
+                if global_id in hunk_ids:
+                    selected_file_hunks.add(file_hunk_id)
+                elif global_id in line_ids:
+                    selected_file_lines[file_hunk_id] = set(line_ids[global_id])
+                global_id += 1
+            if selected_file_hunks or selected_file_lines:
                 parts.append(
-                    "".join(
-                        file_patch.header_lines
-                        + [line for hunk in selected_hunks for line in [hunk.header, *hunk.lines]]
+                    file_patch.selected_patch(
+                        selected_file_hunks,
+                        selected_file_lines,
+                        context_from_new=context_from_new,
                     )
                 )
         return "".join(parts)
+
+
+@dataclass
+class Selection:
+    hunk_ids: set[int] = field(default_factory=set)
+    line_ids: dict[int, set[int]] = field(default_factory=dict)
+
+    @property
+    def empty(self) -> bool:
+        return not self.hunk_ids and not self.line_ids
 
 
 def run_git(args: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -157,8 +278,18 @@ def ensure_repo() -> None:
         raise SystemExit(2) from exc
 
 
-def diff_for_scope(path: str | None, *, zero_context: bool) -> str:
+def short_hash(*parts: str) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def diff_for_scope(path: str | None, *, zero_context: bool, staged: bool = False) -> str:
     args = ["diff", "--no-color", "--no-ext-diff"]
+    if staged:
+        args.append("--cached")
     if zero_context:
         args.extend(["--unified=0", "--inter-hunk-context=0"])
     if path:
@@ -167,16 +298,23 @@ def diff_for_scope(path: str | None, *, zero_context: bool) -> str:
     return result.stdout
 
 
-def no_changes_message(path: str | None) -> str:
+def no_changes_message(path: str | None, *, staged: bool) -> str:
+    scope = "staged" if staged else "unstaged"
     if path:
-        return "No unstaged changes found for that path."
-    return "No unstaged changes found."
+        return f"No {scope} changes found for that path."
+    return f"No {scope} changes found."
 
 
-def no_text_hunks_message(path: str | None) -> str:
+def no_text_hunks_message(path: str | None, *, staged: bool, unsupported: list[UnsupportedChange]) -> str:
+    action = "partial unstaging" if staged else "partial staging"
     if path:
-        return "No text hunks available for partial staging in that path."
-    return "No text hunks available for partial staging."
+        base = f"No text hunks available for {action} in that path."
+    else:
+        base = f"No text hunks available for {action}."
+    if unsupported:
+        details = "; ".join(item.description for item in unsupported)
+        return f"{base} Unsupported changes in scope: {details}."
+    return base
 
 
 def parse_path_marker(line: str) -> str | None:
@@ -188,19 +326,47 @@ def parse_path_marker(line: str) -> str | None:
     return marker
 
 
-def parse_repo_patch(diff_text: str, path: str | None) -> RepoPatch:
-    if not diff_text.strip():
-        raise SystemExit(no_changes_message(path))
+def parse_diff_header_paths(line: str) -> tuple[str | None, str | None]:
+    match = DIFF_GIT_RE.match(line.rstrip("\n"))
+    if not match:
+        return None, None
+    return match.group("old"), match.group("new")
 
-    files: list[FilePatch] = []
+
+def classify_unsupported(file_patch: FilePatch) -> UnsupportedChange:
+    header = "".join(file_patch.header_lines)
+    reason = "non-text change"
+    if "GIT binary patch" in header or "Binary files " in header:
+        reason = "binary file"
+    elif "\nSubmodule " in header:
+        reason = "submodule change"
+    elif "rename from " in header or "rename to " in header:
+        reason = "rename-only change"
+    elif any(
+        line.startswith(prefix)
+        for line in file_patch.header_lines
+        for prefix in ("old mode ", "new mode ", "new file mode ", "deleted file mode ")
+    ):
+        reason = "mode-only change"
+    path = file_patch.path
+    return UnsupportedChange(path=path, reason=reason)
+
+
+def parse_repo_patch(diff_text: str, path: str | None, *, staged: bool) -> RepoPatch:
+    if not diff_text.strip():
+        raise SystemExit(no_changes_message(path, staged=staged))
+
+    parsed_files: list[FilePatch] = []
     current_file: FilePatch | None = None
     current_hunk: Hunk | None = None
 
     for line in diff_text.splitlines(keepends=True):
         if line.startswith("diff --git "):
             if current_file is not None:
-                files.append(current_file)
-            current_file = FilePatch(path=None, header_lines=[line], hunks=[])
+                parsed_files.append(current_file)
+            old_path, new_path = parse_diff_header_paths(line)
+            initial_path = new_path or old_path
+            current_file = FilePatch(path=initial_path, header_lines=[line], hunks=[])
             current_hunk = None
             continue
         if current_file is None:
@@ -224,44 +390,27 @@ def parse_repo_patch(diff_text: str, path: str | None) -> RepoPatch:
             current_hunk.lines.append(line)
 
     if current_file is not None:
-        files.append(current_file)
+        parsed_files.append(current_file)
 
-    files = [file_patch for file_patch in files if file_patch.hunks]
+    files = [file_patch for file_patch in parsed_files if file_patch.hunks]
+    unsupported = [classify_unsupported(file_patch) for file_patch in parsed_files if not file_patch.hunks]
     if not files:
-        raise SystemExit(no_text_hunks_message(path))
-    return RepoPatch(files=files)
+        raise SystemExit(no_text_hunks_message(path, staged=staged, unsupported=unsupported))
+    return RepoPatch(files=files, unsupported=unsupported)
 
 
-def parse_hunk_selection(raw_values: list[str]) -> set[int]:
-    selected: set[int] = set()
-    for raw in raw_values:
-        for part in raw.split(","):
-            value = part.strip()
-            if not value:
-                continue
-            if "-" in value:
-                start_text, end_text = value.split("-", 1)
-                start = int(start_text)
-                end = int(end_text)
-                if end < start:
-                    raise SystemExit(f"Invalid hunk range: {value}")
-                selected.update(range(start, end + 1))
-            else:
-                selected.add(int(value))
-    if not selected:
-        raise SystemExit("At least one hunk id must be provided.")
-    return selected
-
-
-def validate_hunks(max_index: int, selected: set[int]) -> None:
-    invalid = sorted(idx for idx in selected if idx < 1 or idx > max_index)
-    if invalid:
-        joined = ", ".join(str(idx) for idx in invalid)
-        raise SystemExit(f"Invalid hunk id(s): {joined}. Available range: 1-{max_index}")
+def selector_token(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def looks_like_selector(value: str) -> bool:
-    return bool(SELECTOR_RE.fullmatch(value))
+    parts = selector_token(value)
+    return bool(parts) and all(
+        HUNK_SELECTOR_RE.fullmatch(part)
+        or LINE_SELECTOR_RE.fullmatch(part)
+        or STABLE_SELECTOR_RE.fullmatch(part)
+        for part in parts
+    )
 
 
 def resolve_scope_and_selectors(args: argparse.Namespace) -> tuple[str | None, list[str]]:
@@ -275,7 +424,7 @@ def resolve_scope_and_selectors(args: argparse.Namespace) -> tuple[str | None, l
         return None, args.targets
 
     raise SystemExit(
-        "When omitting the path, selectors must be numeric hunk ids or ranges. "
+        "When omitting the path, selectors must be hunk ids, line ids, stable ids, or ranges. "
         "Use --path to disambiguate unusual file names."
     )
 
@@ -297,14 +446,23 @@ def resolve_show_scope_and_selectors(args: argparse.Namespace) -> tuple[str | No
         return None, args.targets
 
     raise SystemExit(
-        "When omitting the path, selectors must be numeric hunk ids or ranges. "
+        "When omitting the path, selectors must be hunk ids, line ids, stable ids, or ranges. "
         "Use --path to disambiguate unusual file names."
     )
 
 
-def build_hunk_payload(hunk: Hunk, hunk_id: int, *, path: str | None = None, file_hunk_id: int | None = None) -> dict:
+def build_hunk_payload(
+    hunk: Hunk,
+    hunk_id: int,
+    stable_id: str,
+    line_entries: list[dict],
+    *,
+    path: str | None = None,
+    file_hunk_id: int | None = None,
+) -> dict:
     payload = {
         "id": hunk_id,
+        "stable_id": stable_id,
         "header": hunk.header.rstrip("\n"),
         "old_start": hunk.old_start,
         "old_count": hunk.old_count,
@@ -313,6 +471,7 @@ def build_hunk_payload(hunk: Hunk, hunk_id: int, *, path: str | None = None, fil
         "kind": hunk.kind,
         "added_lines": hunk.added_lines,
         "removed_lines": hunk.removed_lines,
+        "lines": line_entries,
     }
     if path is not None:
         payload["path"] = path
@@ -321,60 +480,170 @@ def build_hunk_payload(hunk: Hunk, hunk_id: int, *, path: str | None = None, fil
     return payload
 
 
-def build_file_hunk_entries(file_patch: FilePatch, resolved_path: str) -> list[dict]:
+def build_hunk_entries(repo_patch: RepoPatch, path: str | None) -> list[dict]:
     entries: list[dict] = []
-    for idx, hunk in enumerate(file_patch.hunks, start=1):
-        payload = build_hunk_payload(hunk, idx, path=resolved_path, file_hunk_id=idx)
+    hunk_occurrences: dict[str, int] = {}
+
+    for global_id, file_patch, file_hunk_id, hunk in repo_patch.iter_hunks():
+        entry_id = file_hunk_id if path is not None and repo_patch.file_count == 1 else global_id
+        resolved_path = file_patch.path or path
+        change_lines = hunk.change_lines()
+        hunk_signature = json.dumps(
+            {
+                "path": resolved_path,
+                "changes": [change.signature for change in change_lines],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        hunk_occurrence = hunk_occurrences.get(hunk_signature, 0) + 1
+        hunk_occurrences[hunk_signature] = hunk_occurrence
+        stable_id = f"h_{short_hash('hunk', hunk_signature, str(hunk_occurrence))}"
+
+        line_entries: list[dict] = []
+        line_occurrences: dict[str, int] = {}
+        for change in change_lines:
+            line_signature = change.signature
+            line_occurrence = line_occurrences.get(line_signature, 0) + 1
+            line_occurrences[line_signature] = line_occurrence
+            line_entry = {
+                "id": f"{entry_id}.{change.ordinal}",
+                "stable_id": f"c_{short_hash('change', hunk_signature, str(hunk_occurrence), line_signature, str(line_occurrence))}",
+                "kind": change.kind,
+            }
+            if change.addition is not None:
+                line_entry["addition"] = change.addition
+            if change.subtraction is not None:
+                line_entry["subtraction"] = change.subtraction
+            line_entries.append(line_entry)
+
+        payload = build_hunk_payload(
+            hunk,
+            entry_id,
+            stable_id,
+            line_entries,
+            path=resolved_path,
+            file_hunk_id=file_hunk_id,
+        )
         payload["diff"] = file_patch.hunk_patch(hunk)
         if hunk.addition:
             payload["addition"] = hunk.addition
         if hunk.subtraction:
             payload["subtraction"] = hunk.subtraction
         entries.append(payload)
+
     return entries
 
 
-def build_hunk_entries(repo_patch: RepoPatch, path: str | None) -> list[dict]:
-    if path is not None and repo_patch.file_count == 1:
-        file_patch = repo_patch.files[0]
-        resolved_path = file_patch.path or path
-        return build_file_hunk_entries(file_patch, resolved_path)
-
-    hunks_payload = []
-    for global_id, file_patch, file_hunk_id, hunk in repo_patch.iter_hunks():
-        payload = build_hunk_payload(hunk, global_id, path=file_patch.path, file_hunk_id=file_hunk_id)
-        payload["diff"] = file_patch.hunk_patch(hunk)
-        if hunk.addition:
-            payload["addition"] = hunk.addition
-        if hunk.subtraction:
-            payload["subtraction"] = hunk.subtraction
-        hunks_payload.append(payload)
-    return hunks_payload
-
-
-def filter_hunk_entries(entries: list[dict], selected: set[int]) -> list[dict]:
-    selected_entries = [entry for entry in entries if entry["id"] in selected]
+def filter_hunk_entries(entries: list[dict], selected_hunk_ids: set[int]) -> list[dict]:
+    selected_entries = [entry for entry in entries if entry["id"] in selected_hunk_ids]
     if not selected_entries:
         raise SystemExit("No hunks selected")
     return selected_entries
 
 
-def resolve_selected_patch(path: str | None, selectors: list[str]) -> str:
-    diff_text = diff_for_scope(path, zero_context=True)
-    repo_patch = parse_repo_patch(diff_text, path)
-    selected = parse_hunk_selection(selectors)
-    if path is not None and repo_patch.file_count == 1:
-        file_patch = repo_patch.files[0]
-        validate_hunks(len(file_patch.hunks), selected)
-        return file_patch.selected_patch(selected)
+def resolve_selection(entries: list[dict], raw_values: list[str], *, allow_line_selectors: bool) -> Selection:
+    hunk_numeric = {str(entry["id"]): entry["id"] for entry in entries}
+    hunk_stable = {entry["stable_id"]: entry["id"] for entry in entries}
+    line_numeric: dict[str, tuple[int, int]] = {}
+    line_stable: dict[str, tuple[int, int]] = {}
 
-    validate_hunks(repo_patch.hunk_count, selected)
-    return repo_patch.selected_patch(selected)
+    for entry in entries:
+        for line in entry["lines"]:
+            _, ordinal_text = line["id"].split(".", 1)
+            ref = (entry["id"], int(ordinal_text))
+            line_numeric[line["id"]] = ref
+            line_stable[line["stable_id"]] = ref
+
+    selection = Selection()
+    tokens = [token for raw in raw_values for token in selector_token(raw)]
+    if not tokens:
+        if allow_line_selectors:
+            raise SystemExit("At least one hunk id, line id, or stable id must be provided.")
+        raise SystemExit("At least one hunk id or stable id must be provided.")
+
+    for token in tokens:
+        if HUNK_SELECTOR_RE.fullmatch(token):
+            if "-" in token:
+                start_text, end_text = token.split("-", 1)
+                start = int(start_text)
+                end = int(end_text)
+                if end < start:
+                    raise SystemExit(f"Invalid hunk range: {token}")
+                invalid = [idx for idx in range(start, end + 1) if str(idx) not in hunk_numeric]
+                if invalid:
+                    joined = ", ".join(str(idx) for idx in invalid)
+                    raise SystemExit(f"Invalid hunk id(s): {joined}.")
+                selection.hunk_ids.update(range(start, end + 1))
+                continue
+
+            if token not in hunk_numeric:
+                raise SystemExit(f"Invalid hunk id(s): {token}.")
+            selection.hunk_ids.add(hunk_numeric[token])
+            continue
+
+        if token in hunk_stable:
+            selection.hunk_ids.add(hunk_stable[token])
+            continue
+
+        if token in line_numeric:
+            if not allow_line_selectors:
+                raise SystemExit("Line selectors are only supported by pick and unstage.")
+            hunk_id, ordinal = line_numeric[token]
+            selection.line_ids.setdefault(hunk_id, set()).add(ordinal)
+            continue
+
+        if token in line_stable:
+            if not allow_line_selectors:
+                raise SystemExit("Line selectors are only supported by pick and unstage.")
+            hunk_id, ordinal = line_stable[token]
+            selection.line_ids.setdefault(hunk_id, set()).add(ordinal)
+            continue
+
+        raise SystemExit(f"Unknown selector: {token}")
+
+    return selection
 
 
-def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool) -> None:
+def warn_unsupported(repo_patch: RepoPatch, *, staged: bool) -> None:
+    if not repo_patch.unsupported:
+        return
+    scope = "staged" if staged else "unstaged"
+    details = "; ".join(item.description for item in repo_patch.unsupported)
+    sys.stderr.write(f"Ignored unsupported {scope} changes: {details}\n")
+
+
+def resolve_selected_patch(path: str | None, selectors: list[str], *, staged: bool) -> str:
+    diff_text = diff_for_scope(path, zero_context=True, staged=staged)
+    repo_patch = parse_repo_patch(diff_text, path, staged=staged)
+    entries = build_hunk_entries(repo_patch, path)
+    selection = resolve_selection(entries, selectors, allow_line_selectors=True)
+    try:
+        if path is not None and repo_patch.file_count == 1:
+            file_patch = repo_patch.files[0]
+            return file_patch.selected_patch(
+                selection.hunk_ids,
+                selection.line_ids,
+                context_from_new=staged,
+            )
+        return repo_patch.selected_patch(
+            selection.hunk_ids,
+            selection.line_ids,
+            context_from_new=staged,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool, reverse: bool = False) -> None:
+    reverse_args = ["--reverse"] if reverse else []
+
     def attempt(extra_args: list[str]) -> subprocess.CompletedProcess[str]:
-        return run_git(["apply", "--cached", "--check", "--recount", *extra_args, "-"], input_text=patch_text, check=False)
+        return run_git(
+            ["apply", "--cached", "--check", "--recount", *reverse_args, *extra_args, "-"],
+            input_text=patch_text,
+            check=False,
+        )
 
     check_result = attempt([])
     extra_args: list[str] = []
@@ -386,7 +655,11 @@ def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool) -> None:
             sys.stderr.write(check_result.stderr or "git apply --check failed\n")
             raise SystemExit(check_result.returncode or 1)
 
-    apply_result = run_git(["apply", "--cached", "--recount", *extra_args, "-"], input_text=patch_text, check=False)
+    apply_result = run_git(
+        ["apply", "--cached", "--recount", *reverse_args, *extra_args, "-"],
+        input_text=patch_text,
+        check=False,
+    )
     if apply_result.returncode != 0:
         sys.stderr.write(apply_result.stderr or "git apply failed\n")
         raise SystemExit(apply_result.returncode or 1)
@@ -394,36 +667,43 @@ def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool) -> None:
 
 def cmd_show(args: argparse.Namespace) -> int:
     path, selectors = resolve_show_scope_and_selectors(args)
-    diff_text = diff_for_scope(path, zero_context=True)
-    repo_patch = parse_repo_patch(diff_text, path)
+    diff_text = diff_for_scope(path, zero_context=True, staged=args.staged)
+    repo_patch = parse_repo_patch(diff_text, path, staged=args.staged)
     entries = build_hunk_entries(repo_patch, path)
+    warn_unsupported(repo_patch, staged=args.staged)
     if selectors:
-        selected = parse_hunk_selection(selectors)
-        if path is not None and repo_patch.file_count == 1:
-            validate_hunks(len(entries), selected)
-        else:
-            validate_hunks(len(entries), selected)
-        entries = filter_hunk_entries(entries, selected)
+        selection = resolve_selection(entries, selectors, allow_line_selectors=False)
+        entries = filter_hunk_entries(entries, selection.hunk_ids)
     json.dump(entries, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 
 
 def cmd_patch(args: argparse.Namespace) -> int:
-    diff_text = diff_for_scope(args.path, zero_context=args.zero_context)
+    diff_text = diff_for_scope(args.path, zero_context=args.zero_context, staged=args.staged)
     if not diff_text.strip():
-        raise SystemExit(no_changes_message(args.path))
+        raise SystemExit(no_changes_message(args.path, staged=args.staged))
     sys.stdout.write(diff_text)
     return 0
 
 
-def cmd_stage(args: argparse.Namespace) -> int:
+def cmd_pick(args: argparse.Namespace) -> int:
     path, selectors = resolve_scope_and_selectors(args)
-    patch_text = resolve_selected_patch(path, selectors)
+    patch_text = resolve_selected_patch(path, selectors, staged=False)
     if args.print_patch:
         sys.stdout.write(patch_text)
         return 0
     apply_patch_text(patch_text, allow_unidiff_zero=True)
+    return 0
+
+
+def cmd_unstage(args: argparse.Namespace) -> int:
+    path, selectors = resolve_scope_and_selectors(args)
+    patch_text = resolve_selected_patch(path, selectors, staged=True)
+    if args.print_patch:
+        sys.stdout.write(patch_text)
+        return 0
+    apply_patch_text(patch_text, allow_unidiff_zero=True, reverse=True)
     return 0
 
 
@@ -439,13 +719,13 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Stage only selected slices of a changed file.")
+    parser = argparse.ArgumentParser(description="Stage or unstage selected slices of a changed file.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     show_parser = subparsers.add_parser(
         "show",
-        help="Show selectable hunks as JSON with inline diff text.",
-        usage="slice show [--path PATH] [selectors ...]",
+        help="Show selectable hunks as JSON with stable ids and line-level selectors.",
+        usage="slice show [--path PATH] [--staged] [selectors ...]",
     )
     show_parser.add_argument(
         "--path",
@@ -453,17 +733,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical way to limit the diff scope to one file.",
     )
     show_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Inspect staged changes instead of unstaged changes.",
+    )
+    show_parser.add_argument(
         "targets",
         nargs="*",
         help=(
-            "Repo-wide selectors like '1 3 5-7'. "
+            "Repo-wide hunk selectors like '1 3 5-7' or stable hunk ids. "
             "Positional '<path> [selectors...]' still works as a compatibility shortcut."
         ),
     )
     show_parser.set_defaults(func=cmd_show)
 
-    patch_parser = subparsers.add_parser("patch", help="Print the current unstaged patch.")
+    patch_parser = subparsers.add_parser("patch", help="Print the current patch.")
     patch_parser.add_argument("path", nargs="?", help="Optional path to limit the diff scope.")
+    patch_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Print the staged patch instead of the unstaged patch.",
+    )
     patch_parser.add_argument(
         "--zero-context",
         action="store_true",
@@ -471,30 +761,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     patch_parser.set_defaults(func=cmd_patch)
 
-    stage_parser = subparsers.add_parser(
+    pick_parser = subparsers.add_parser(
         "pick",
-        help="Stage selected hunk ids.",
+        help="Stage selected hunks or line changes.",
         usage="slice pick [--path PATH] <selectors ...>",
     )
-    stage_parser.add_argument(
+    pick_parser.add_argument(
         "--path",
         dest="path_option",
         help="Canonical way to limit staging to one file.",
     )
-    stage_parser.add_argument(
+    pick_parser.add_argument(
         "targets",
         nargs="+",
         help=(
-            "Selectors like '1 3 5-7'. "
+            "Selectors like '1 3 5-7', line selectors like '2.1', or stable ids. "
             "Positional '<path> <selectors...>' still works as a compatibility shortcut."
         ),
     )
-    stage_parser.add_argument(
+    pick_parser.add_argument(
         "--print-patch",
         action="store_true",
         help="Print the patch that would be applied instead of staging it.",
     )
-    stage_parser.set_defaults(func=cmd_stage)
+    pick_parser.set_defaults(func=cmd_pick)
+
+    unstage_parser = subparsers.add_parser(
+        "unstage",
+        help="Unstage selected hunks or line changes.",
+        usage="slice unstage [--path PATH] <selectors ...>",
+    )
+    unstage_parser.add_argument(
+        "--path",
+        dest="path_option",
+        help="Canonical way to limit unstaging to one file.",
+    )
+    unstage_parser.add_argument(
+        "targets",
+        nargs="+",
+        help=(
+            "Selectors like '1 3 5-7', line selectors like '2.1', or stable ids. "
+            "Positional '<path> <selectors...>' still works as a compatibility shortcut."
+        ),
+    )
+    unstage_parser.add_argument(
+        "--print-patch",
+        action="store_true",
+        help="Print the patch that would be reversed instead of unstaging it.",
+    )
+    unstage_parser.set_defaults(func=cmd_unstage)
 
     apply_parser = subparsers.add_parser("apply", help="Apply an edited patch to the index.")
     apply_parser.add_argument("patch_file", help="Patch file path or - to read from stdin.")

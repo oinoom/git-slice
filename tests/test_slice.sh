@@ -466,6 +466,192 @@ assert "addition" not in by_path["del.txt"], by_path
 PY
 }
 
+case_line_level_selection_and_stable_ids() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > stable.txt <<'EOF'
+alpha
+beta
+gamma
+delta
+epsilon
+zeta
+eta
+theta
+EOF
+  git add stable.txt
+  git commit -q -m "initial"
+
+  cat > stable.txt <<'EOF'
+ALPHA
+BETA
+gamma
+delta
+epsilon
+zeta
+eta
+THETA
+EOF
+
+  "$TOOL" show stable.txt > before.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("before.json").read_text())
+assert len(payload) == 2, payload
+assert payload[0]["stable_id"].startswith("h_"), payload
+assert payload[0]["lines"][0]["stable_id"].startswith("c_"), payload
+assert payload[0]["lines"][0]["id"] == "1.1", payload
+assert payload[0]["lines"][1]["id"] == "1.2", payload
+Path("line_selector.txt").write_text(payload[0]["lines"][1]["stable_id"])
+Path("later_hunk.txt").write_text(payload[1]["stable_id"])
+PY
+
+  line_selector=$(cat line_selector.txt)
+  later_hunk=$(cat later_hunk.txt)
+
+  "$TOOL" show stable.txt "$later_hunk" > selected.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("selected.json").read_text())
+selector = Path("later_hunk.txt").read_text()
+assert len(payload) == 1, payload
+assert payload[0]["stable_id"] == selector, payload
+PY
+
+  "$TOOL" pick stable.txt "$line_selector"
+  git diff --cached -- stable.txt > staged.diff
+  git diff -- stable.txt > unstaged.diff
+  grep -q '+BETA' staged.diff
+  if grep -q '+ALPHA' staged.diff; then
+    echo "unexpected staged ALPHA change" >&2
+    return 1
+  fi
+  grep -q '+ALPHA' unstaged.diff
+  grep -q '+THETA' unstaged.diff
+
+  "$TOOL" show stable.txt > after.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("after.json").read_text())
+later_hunk = Path("later_hunk.txt").read_text()
+assert any(entry["stable_id"] == later_hunk for entry in payload), payload
+PY
+}
+
+case_show_staged_and_line_level_unstage() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > staged.txt <<'EOF'
+alpha
+beta
+gamma
+EOF
+  git add staged.txt
+  git commit -q -m "initial"
+
+  cat > staged.txt <<'EOF'
+ALPHA
+BETA
+gamma
+EOF
+
+  "$TOOL" pick staged.txt 1
+  "$TOOL" show --staged staged.txt > staged.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("staged.json").read_text())
+assert len(payload) == 1, payload
+assert len(payload[0]["lines"]) == 2, payload
+Path("unstage_selector.txt").write_text(payload[0]["lines"][0]["stable_id"])
+PY
+
+  unstage_selector=$(cat unstage_selector.txt)
+  "$TOOL" unstage staged.txt "$unstage_selector"
+  git diff --cached -- staged.txt > staged.diff
+  git diff -- staged.txt > unstaged.diff
+  grep -q '+BETA' staged.diff
+  if grep -q '+ALPHA' staged.diff; then
+    echo "unexpected staged ALPHA change after unstage" >&2
+    return 1
+  fi
+  grep -q '+ALPHA' unstaged.diff
+  if grep -q '+BETA' unstaged.diff; then
+    echo "unexpected unstaged BETA change after unstage" >&2
+    return 1
+  fi
+}
+
+case_binary_unsupported_reporting() {
+  repo=$(make_repo)
+  cd "$repo"
+  python3 - <<'PY'
+from pathlib import Path
+
+Path("image.bin").write_bytes(b"\x00\x01\x02\x03")
+PY
+  git add image.bin
+  git commit -q -m "initial"
+
+  python3 - <<'PY'
+from pathlib import Path
+
+Path("image.bin").write_bytes(b"\x10\x11\x12\x13")
+PY
+
+  if "$TOOL" show image.bin >out 2>err; then
+    echo "expected binary unsupported failure" >&2
+    return 1
+  fi
+  grep -q 'binary file: image.bin' err
+}
+
+case_supported_and_unsupported_mix() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > notes.txt <<'EOF'
+red
+green
+blue
+EOF
+  python3 - <<'PY'
+from pathlib import Path
+
+Path("image.bin").write_bytes(b"\x00\x01\x02\x03")
+PY
+  git add notes.txt image.bin
+  git commit -q -m "initial"
+
+  cat > notes.txt <<'EOF'
+red
+GREEN
+blue
+EOF
+  python3 - <<'PY'
+from pathlib import Path
+
+Path("image.bin").write_bytes(b"\x10\x11\x12\x13")
+PY
+
+  "$TOOL" show > mixed.json 2>err
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("mixed.json").read_text())
+assert len(payload) == 1, payload
+assert payload[0]["path"] == "notes.txt", payload
+PY
+  grep -q 'Ignored unsupported unstaged changes: binary file: image.bin' err
+}
+
 case_git_subcommand_integration() {
   repo=$(make_repo)
   cd "$repo"
@@ -517,6 +703,10 @@ case_invalid_selector
 case_no_changes
 case_additions_and_deletions
 case_optional_addition_and_subtraction_fields
+case_line_level_selection_and_stable_ids
+case_show_staged_and_line_level_unstage
+case_binary_unsupported_reporting
+case_supported_and_unsupported_mix
 case_git_subcommand_integration
 
 echo "ok"
