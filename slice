@@ -74,6 +74,13 @@ class Hunk:
         return int(match.group("new_count") or "1")
 
     @property
+    def suffix(self) -> str:
+        match = HUNK_RE.match(self.header)
+        if not match:
+            raise ValueError(f"Invalid hunk header: {self.header}")
+        return match.group("suffix") or ""
+
+    @property
     def addition(self) -> str:
         return "".join(self.added_lines_raw())
 
@@ -148,6 +155,40 @@ class Hunk:
             return []
         return rendered
 
+    def contextual_addition_patch(self, base_lines: list[str]) -> tuple[str, list[str]] | None:
+        if self.kind != "addition":
+            return None
+
+        added_lines = self.added_lines_raw()
+        if not added_lines:
+            return None
+
+        # Zero-context addition hunks can drift into the following statement when
+        # applied in isolation. Anchor them with one real base-file context line.
+        if self.old_start > 0 and self.old_start <= len(base_lines):
+            context_line = base_lines[self.old_start - 1]
+            header = format_hunk_header(
+                self.old_start,
+                1,
+                self.old_start,
+                1 + len(added_lines),
+                self.suffix,
+            )
+            return header, [f" {context_line}", *added_lines]
+
+        if self.old_start == 0 and base_lines:
+            context_line = base_lines[0]
+            header = format_hunk_header(
+                1,
+                1,
+                1,
+                1 + len(added_lines),
+                self.suffix,
+            )
+            return header, [*added_lines, f" {context_line}"]
+
+        return None
+
 
 @dataclass
 class FilePatch:
@@ -164,11 +205,21 @@ class FilePatch:
         line_ids: dict[int, set[int]],
         *,
         context_from_new: bool = False,
+        base_lines: list[str] | None = None,
     ) -> str:
         rendered_hunks: list[str] = []
         for idx, hunk in enumerate(self.hunks, start=1):
             if idx in hunk_ids:
-                rendered_hunks.extend([hunk.header, *hunk.lines])
+                contextual_hunk = (
+                    hunk.contextual_addition_patch(base_lines)
+                    if base_lines is not None
+                    else None
+                )
+                if contextual_hunk is not None:
+                    header, lines = contextual_hunk
+                    rendered_hunks.extend([header, *lines])
+                else:
+                    rendered_hunks.extend([hunk.header, *hunk.lines])
                 continue
 
             selected_changes = line_ids.get(idx)
@@ -227,6 +278,7 @@ class RepoPatch:
         line_ids: dict[int, set[int]],
         *,
         context_from_new: bool = False,
+        base_lines_by_path: dict[str | None, list[str] | None] | None = None,
     ) -> str:
         parts: list[str] = []
         global_id = 1
@@ -245,6 +297,11 @@ class RepoPatch:
                         selected_file_hunks,
                         selected_file_lines,
                         context_from_new=context_from_new,
+                        base_lines=(
+                            base_lines_by_path.get(file_patch.path)
+                            if base_lines_by_path is not None
+                            else None
+                        ),
                     )
                 )
         return "".join(parts)
@@ -284,6 +341,15 @@ def short_hash(*parts: str) -> str:
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:16]
+
+
+def format_hunk_header(old_start: int, old_count: int, new_start: int, new_count: int, suffix: str) -> str:
+    def format_range(start: int, count: int) -> str:
+        if count == 1:
+            return str(start)
+        return f"{start},{count}"
+
+    return f"@@ -{format_range(old_start, old_count)} +{format_range(new_start, new_count)} @@{suffix}\n"
 
 
 def diff_for_scope(path: str | None, *, zero_context: bool, staged: bool = False) -> str:
@@ -613,6 +679,16 @@ def warn_unsupported(repo_patch: RepoPatch, *, staged: bool) -> None:
     sys.stderr.write(f"Ignored unsupported {scope} changes: {details}\n")
 
 
+def load_base_lines(path: str | None, *, staged: bool) -> list[str] | None:
+    if path is None:
+        return None
+    spec = f"HEAD:{path}" if staged else f":{path}"
+    result = run_git(["show", spec], check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.splitlines(keepends=True)
+
+
 def resolve_selected_patch(path: str | None, selectors: list[str], *, staged: bool) -> str:
     diff_text = diff_for_scope(path, zero_context=True, staged=staged)
     repo_patch = parse_repo_patch(diff_text, path, staged=staged)
@@ -625,11 +701,17 @@ def resolve_selected_patch(path: str | None, selectors: list[str], *, staged: bo
                 selection.hunk_ids,
                 selection.line_ids,
                 context_from_new=staged,
+                base_lines=load_base_lines(file_patch.path or path, staged=staged),
             )
+        base_lines_by_path = {
+            file_patch.path: load_base_lines(file_patch.path, staged=staged)
+            for file_patch in repo_patch.files
+        }
         return repo_patch.selected_patch(
             selection.hunk_ids,
             selection.line_ids,
             context_from_new=staged,
+            base_lines_by_path=base_lines_by_path,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

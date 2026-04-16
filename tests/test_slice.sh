@@ -473,6 +473,73 @@ PY
   fi
 }
 
+case_later_addition_hunk_keeps_location() {
+  repo=$(make_repo)
+  cd "$repo"
+  cat > demo.py <<'EOF'
+def main():
+    files = [
+        "data.h",
+        "lib.c",
+        "log.c",
+        "obu.c",
+    ]
+
+    shutil.copy(
+        src,
+        dst,
+    )
+EOF
+  git add demo.py
+  git commit -q -m "initial"
+
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("demo.py")
+text = path.read_text()
+text = text.replace('        "log.c",\n', '        "log.c",\n        "mem.c",\n', 1)
+text = text.replace(
+    '\n    shutil.copy(\n',
+    '\n        callgate_wrapper_c = Path("callgate_wrapper.c")\n'
+    '        callgate_text = callgate_wrapper_c.read_text()\n'
+    '\n'
+    '    shutil.copy(\n',
+    1,
+)
+path.write_text(text)
+PY
+
+  "$TOOL" show demo.py > later.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("later.json").read_text())
+assert len(payload) == 2, payload
+assert payload[1]["kind"] == "addition", payload
+assert payload[1]["old_count"] == 0, payload
+PY
+
+  "$TOOL" pick demo.py 2
+  git show :demo.py > staged.py
+  python3 - <<'PY'
+from pathlib import Path
+
+lines = Path("staged.py").read_text().splitlines()
+call_idx = lines.index('        callgate_wrapper_c = Path("callgate_wrapper.c")')
+copy_idx = lines.index("    shutil.copy(")
+assert call_idx < copy_idx, lines
+PY
+
+  if grep -q '"mem.c"' staged.py; then
+    echo "unexpected earlier hunk staged" >&2
+    return 1
+  fi
+  git diff -- demo.py > unstaged.diff
+  grep -q '"mem.c"' unstaged.diff
+}
+
 case_optional_addition_and_subtraction_fields() {
   repo=$(make_repo)
   cd "$repo"
@@ -746,6 +813,7 @@ case_invalid_selector
 case_no_changes
 case_additions_and_deletions
 case_addition_only_pick_keeps_location
+case_later_addition_hunk_keeps_location
 case_optional_addition_and_subtraction_fields
 case_line_level_selection_and_stable_ids
 case_show_staged_and_line_level_unstage
