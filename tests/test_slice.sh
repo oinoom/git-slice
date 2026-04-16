@@ -430,6 +430,49 @@ PY
   git apply --cached --check --recount --unidiff-zero shape.patch
 }
 
+case_addition_only_pick_keeps_location() {
+  repo=$(make_repo)
+  cd "$repo"
+  seq 1 10 > demo.txt
+  git add demo.txt
+  git commit -q -m "initial"
+
+  python3 - <<'PY'
+from pathlib import Path
+
+lines = Path("demo.txt").read_text().splitlines()
+lines.insert(5, "INSERTED")
+Path("demo.txt").write_text("\n".join(lines) + "\n")
+PY
+
+  "$TOOL" show demo.txt > addition.json
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("addition.json").read_text())
+assert len(payload) == 1, payload
+assert payload[0]["kind"] == "addition", payload
+assert payload[0]["old_count"] == 0, payload
+PY
+
+  "$TOOL" pick demo.txt 1
+  git show :demo.txt > staged.txt
+  python3 - <<'PY'
+from pathlib import Path
+
+lines = Path("staged.txt").read_text().splitlines()
+assert lines[5] == "INSERTED", lines
+PY
+
+  if git diff --quiet -- demo.txt; then
+    :
+  else
+    echo "expected insertion to be fully staged" >&2
+    return 1
+  fi
+}
+
 case_optional_addition_and_subtraction_fields() {
   repo=$(make_repo)
   cd "$repo"
@@ -702,6 +745,7 @@ case_path_with_spaces
 case_invalid_selector
 case_no_changes
 case_additions_and_deletions
+case_addition_only_pick_keeps_location
 case_optional_addition_and_subtraction_fields
 case_line_level_selection_and_stable_ids
 case_show_staged_and_line_level_unstage

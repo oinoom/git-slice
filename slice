@@ -637,6 +637,7 @@ def resolve_selected_patch(path: str | None, selectors: list[str], *, staged: bo
 
 def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool, reverse: bool = False) -> None:
     reverse_args = ["--reverse"] if reverse else []
+    extra_args: list[str] = ["--unidiff-zero"] if allow_unidiff_zero else []
 
     def attempt(extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         return run_git(
@@ -645,15 +646,10 @@ def apply_patch_text(patch_text: str, *, allow_unidiff_zero: bool, reverse: bool
             check=False,
         )
 
-    check_result = attempt([])
-    extra_args: list[str] = []
+    check_result = attempt(extra_args)
     if check_result.returncode != 0:
-        if allow_unidiff_zero:
-            check_result = attempt(["--unidiff-zero"])
-            extra_args = ["--unidiff-zero"]
-        if check_result.returncode != 0:
-            sys.stderr.write(check_result.stderr or "git apply --check failed\n")
-            raise SystemExit(check_result.returncode or 1)
+        sys.stderr.write(check_result.stderr or "git apply --check failed\n")
+        raise SystemExit(check_result.returncode or 1)
 
     apply_result = run_git(
         ["apply", "--cached", "--recount", *reverse_args, *extra_args, "-"],
